@@ -1,8 +1,14 @@
 #!/bin/sh
 set -eu
 
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-WORKSPACE=${1:-/tmp/org-demo-workspace}
+if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
+  echo "Usage: $0 SERVER_REPO TUI_REPO [WORKSPACE]" >&2
+  exit 2
+fi
+
+SERVER_REPO=$(CDPATH= cd -- "$1" && pwd)
+TUI_REPO=$(CDPATH= cd -- "$2" && pwd)
+WORKSPACE=${3:-/tmp/org-demo-workspace}
 DATA_DIR=${TMPDIR:-/tmp}/org-demo-data
 mkdir -p "$WORKSPACE" "$DATA_DIR"
 SOCKET=$DATA_DIR/server.sock
@@ -28,7 +34,7 @@ trap cleanup 0
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-(cd "$ROOT" && bun start --data-dir "$DATA_DIR" --recover) >"$WORKSPACE/org-server.log" 2>&1 &
+(cd "$SERVER_REPO" && bun start --data-dir "$DATA_DIR" --recover) >"$WORKSPACE/org-server.log" 2>&1 &
 SERVER_PID=$!
 
 # Wait for the server socket, or report a startup failure rather than hanging.
@@ -47,9 +53,9 @@ while [ ! -S "$SOCKET" ]; do
 done
 
 if [ "$INITIALIZE_ORG" -eq 1 ]; then
-  (cd "$ROOT" && bun run demo "$SOCKET" "$WORKSPACE") >"$WORKSPACE/org-demo.log" 2>&1 &
+  (cd "$SERVER_REPO" && bun run demo "$SOCKET" "$WORKSPACE") >"$WORKSPACE/org-demo.log" 2>&1 &
   DEMO_PID=$!
 fi
 
 echo "Demo is running; opening the TUI. Logs: $WORKSPACE/org-demo.log and org-server.log"
-(cd "$ROOT/tui" && bun run start --socket "$SOCKET")
+(cd "$TUI_REPO" && bun run start --socket "$SOCKET")
