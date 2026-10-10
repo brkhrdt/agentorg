@@ -6,6 +6,7 @@ import type * as acp from "@agentclientprotocol/sdk";
 import { Store } from "./store.ts";
 import { workerArgs } from "./runtime.ts";
 import { AgentProcess, deadline } from "./process.ts";
+import { pluginError, pluginHost, pluginTimeout } from "./plugin-host.ts";
 import type {
   HarnessPlugin,
   LaunchContext,
@@ -123,9 +124,13 @@ export class Organization implements PluginHost {
   async use(plugin: ServerPlugin) {
     if (plugin.apiVersion !== 1)
       throw new Error(
-        `Plugin ${plugin.name} requires unsupported API ${plugin.apiVersion}`,
+        `${plugin.name}: requires unsupported API ${plugin.apiVersion}`,
       );
-    await plugin.setup(this);
+    try {
+      await plugin.setup(pluginHost(this, plugin.name));
+    } catch (error) {
+      throw pluginError(plugin.name, error);
+    }
   }
   registerSettings(extension: ExtensionSettings) {
     if (!/^[a-z][a-z0-9.-]*$/.test(extension.namespace) || this.extensionSettings.has(extension.namespace))
@@ -963,17 +968,17 @@ export class Organization implements PluginHost {
     try {
       this.validateSettings(a.settings);
       for (const hook of this.contextHooks)
-        await deadline(Promise.resolve(hook(context)), this.limits.startTimeoutMs, "Launch preparation timed out");
+        await deadline(Promise.resolve(hook(context)), this.limits.startTimeoutMs, pluginTimeout(hook, "Launch preparation timed out"));
       let spec = await deadline(
         Promise.resolve(harness.launch(context)),
         this.limits.startTimeoutMs,
-        "Harness launch timed out",
+        pluginTimeout(harness.launch, "Harness launch timed out"),
       );
       for (const hook of this.launchHooks)
         spec = await deadline(
           Promise.resolve(hook(spec, context)),
           this.limits.startTimeoutMs,
-          "Launch hook timed out",
+          pluginTimeout(hook, "Launch hook timed out"),
         );
       spec = {
         ...spec,
@@ -982,7 +987,7 @@ export class Organization implements PluginHost {
           ORG_SOCKET: this.socketPath, ORG_TOKEN: token, ORG_AGENT_ID: a.id },
       };
       for (const hook of this.launchValidators)
-        await deadline(Promise.resolve(hook(spec, context)), this.limits.startTimeoutMs, "Launch validation timed out");
+        await deadline(Promise.resolve(hook(spec, context)), this.limits.startTimeoutMs, pluginTimeout(hook, "Launch validation timed out"));
       const proc = new AgentProcess(
         spec,
         this.limits,
@@ -1376,7 +1381,7 @@ export class Organization implements PluginHost {
           await deadline(
             Promise.resolve(hook()),
             this.limits.stopTimeoutMs,
-            "Plugin shutdown timed out",
+            pluginTimeout(hook, "Plugin shutdown timed out"),
           );
         } catch (error) {
           this.emit("plugin.error", errorShape(error));

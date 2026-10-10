@@ -624,7 +624,7 @@ test("plugin hooks/endpoints/tools and incompatible versions", async () => {
     await client.request<{ value: number }>("custom.echo", { value: 1 }),
   ).toEqual({ value: 1 });
   expect(await client.request("custom.fail").catch((e: any) => e.message)).toBe(
-    "isolated",
+    "test-plugin: isolated",
   );
   await create(client);
   expect(observed).toContain("agent.created");

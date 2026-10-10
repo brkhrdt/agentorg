@@ -42,6 +42,17 @@ safe shutdown remain host-owned. Workspace policy plugins validate final cwd.
 `capabilities.plugins` is an uninterpreted namespaced discovery map; absent maps
 on older servers mean optional plugin features are unavailable.
 
+The host prefixes plugin setup and callback failures with the plugin's `name`,
+for example `skills: cwd must be unique`, while preserving API error codes.
+This includes lifecycle hooks, settings callbacks, harnesses, endpoints, tools,
+observers, shutdown hooks and mutation apply/rollback/finalize callbacks. Callback
+timeouts also identify their plugin. Delegated failures retain the originating
+plugin rather than accumulating prefixes. Plugins receive a scoped `PluginHost`;
+error/warning events emitted through it (types ending in `.error`, `.warn` or
+`.warning`, including the bare names) have string payloads or their `message`
+field prefixed too. Ordinary event payloads are unchanged. Direct console output
+is not intercepted.
+
 This is compensation, not a distributed transaction. SQLite is atomic only for
 core rows. Plugins must journal filesystem/external actions before applying them
 and reconcile on initialization. A crash between apply and record commit requires
