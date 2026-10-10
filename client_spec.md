@@ -151,7 +151,7 @@ Unknown event names and additional fields must not crash the client. Plugins can
 ```ts
 interface AgentSettings {
   harness: string;                 // Required, nonempty on creation.
-  model: string;                   // Required, nonempty on creation.
+  model?: string;                  // Optional, nonempty when supplied.
   provider?: string;
   cwd?: string;
   env?: Record<string, string>;
@@ -169,7 +169,7 @@ Request settings objects reject unknown top-level properties. `options` and `env
 - Children do not automatically inherit their parent's harness, model, working directory, or options. Send the intended settings explicitly.
 - Socket snapshots/events can contain settings and environment values. Treat received/logged data as potentially sensitive.
 
-With the separate Pi plugin loaded, for `harness: "pi"`, `model` must be an **exact Pi model ID**, with `provider` specified separately when desired. Fuzzy patterns/provider-prefixed IDs are not the adapter's supported setting format: startup verifies that Pi selected the exact requested ID/provider and fails rather than falling back.
+With the separate Pi plugin loaded, for `harness: "pi"`, a supplied `model` must be an **exact Pi model ID**, with `provider` specified separately when desired. Omit `model` to use Pi's configured default; the literal string `"default"` is not a model ID. Fuzzy patterns/provider-prefixed IDs are not the adapter's supported setting format: startup verifies that Pi selected the exact requested ID/provider and fails rather than falling back.
 
 Pi `options` accepts only:
 

@@ -18,7 +18,7 @@ const plugin: ServerPlugin = {
           .parse(agent.settings.options);
         return {
           command: options.command,
-          args: [...options.args, "--model", agent.settings.model],
+          args: [...options.args, ...(agent.settings.model ? ["--model", agent.settings.model] : [])],
           // cwd/env omitted: organization launch defaults apply.
           // The wrapper must implement ACP v1 on stdin/stdout and honor
           // MCP servers passed by ACP session/new or session/load.

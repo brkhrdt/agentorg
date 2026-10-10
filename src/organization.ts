@@ -1259,7 +1259,7 @@ export class Organization implements PluginHost {
     this.registerTool({
       name: "child_create",
       description:
-        "Create your own direct child. Returns a lifecycle operation; use operation_wait until completed to obtain result.id. Children may use a different harness/model.",
+        "Create your own direct child. Returns a lifecycle operation; use operation_wait until completed to obtain result.id. Children may use a different harness/model. Specify an exact model ID when selecting one. To use Pi's configured default model, omit settings.model; the literal value \"default\" is not a model ID.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1274,7 +1274,7 @@ export class Organization implements PluginHost {
               options: { type: "object" },
               env: { type: "object" },
             },
-            required: ["harness", "model"],
+            required: ["harness"],
             additionalProperties: false,
           },
         },

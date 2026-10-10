@@ -3,7 +3,7 @@ import { z } from "zod";
 export const settingsSchema = z
   .object({
     harness: z.string().min(1),
-    model: z.string().min(1),
+    model: z.string().min(1).optional(),
     provider: z.string().optional(),
     cwd: z.string().min(1).optional(),
     env: z.record(z.string(), z.string()).optional(),

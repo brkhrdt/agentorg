@@ -69,7 +69,7 @@ The client creates a Pi root using **`openai-codex/gpt-6-luna`**, subscribes to 
 
 See [`client_spec.md`](client_spec.md) for the complete client implementation contract, schemas, event payloads, reconnect procedure, and current limitations.
 
-Every record ends with LF. Literal Unicode line/paragraph separators are supported. IDs correlate responses; events may precede responses and concurrent requests may finish out of order.
+Every record ends with LF. Literal Unicode line/paragraph separators are supported. IDs correlate responses; events may precede responses and concurrent requests may finish out of order. `settings.model` is optional; with the Pi plugin, omit it to use Pi's configured default model (the literal string `"default"` is not a model ID).
 
 ```json
 {"id":"1","method":"agent.create","params":{"name":"root","settings":{"harness":"pi","provider":"openai-codex","model":"gpt-6-luna","cwd":"/tmp/project","options":{"thinking":"low"}}}}
