@@ -15,7 +15,10 @@ export interface LaunchContext {
   socketPath: string;
   dataDir: string;
   token: string;
+  /** Host-owned MCP launch specs, including full argv/env; adapters must not infer core worker paths. */
   mcpServers: McpServer[];
+  /** Explicit files supplied by the enabled skills manager; never ambient discovery. */
+  skillPaths?: string[];
 }
 export interface HarnessPlugin {
   name: string;
@@ -37,8 +40,27 @@ export interface ToolDefinition {
     api: PluginHost,
   ): unknown | Promise<unknown>;
 }
+export interface SkillsChange {
+  /** Called after the old process stops, before records commit. */
+  apply(): Promise<void>;
+  /** Compensate on pre-commit failure, retaining uncertain/user artifacts. */
+  rollback(): Promise<void>;
+  /** Records committed; journal finalization failure cannot undo the commit. */
+  committed(): Promise<void>;
+}
+export interface SkillsManager {
+  prepare(settings: Settings, agent: Readonly<AgentRecord>, context: {
+    caller: Caller; selectionSupplied: boolean; creating: boolean;
+  }): Promise<SkillsChange>;
+  launchPaths(agent: Readonly<AgentRecord>): Promise<string[]>;
+  reconcile(agents: Readonly<AgentRecord>[]): Promise<void>;
+}
+
 /** API v1 is additive. Breaking changes require a new apiVersion. Plugins are trusted. */
 export interface PluginHost {
+  readonly dataDir: string;
+  /** One skills manager; core owns serialized mutations and atomic ancestor grants. */
+  registerSkills(manager: SkillsManager): void;
   registerHarness(harness: HarnessPlugin): void;
   registerEndpoint(
     name: string,

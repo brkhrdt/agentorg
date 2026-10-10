@@ -1,9 +1,11 @@
 import { resolve, join } from "node:path";
+import { realpath, stat } from "node:fs/promises";
 import { isDeepStrictEqual } from "node:util";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { z } from "zod";
 import type * as acp from "@agentclientprotocol/sdk";
 import { Store } from "./store.ts";
+import { workerArgs } from "./runtime.ts";
 import { AgentProcess, deadline } from "./process.ts";
 import type {
   HarnessPlugin,
@@ -12,6 +14,8 @@ import type {
   PluginHost,
   ServerPlugin,
   ToolDefinition,
+  SkillsManager,
+  SkillsChange,
 } from "./plugin.ts";
 import {
   ApiError,
@@ -20,6 +24,7 @@ import {
   errorShape,
   now,
   settingsSchema,
+  settingsPatchSchema,
   terminal,
   type AgentRecord,
   type Caller,
@@ -85,6 +90,7 @@ export class Organization implements PluginHost {
       agent: Readonly<AgentRecord>,
     ) => Settings | Promise<Settings>
   > = [];
+  private skillsManager?: SkillsManager;
   private shutdownHooks: Array<() => void | Promise<void>> = [];
   private permissions = new Map<string, Permission>();
   private tail: Promise<unknown> = Promise.resolve();
@@ -114,6 +120,62 @@ export class Organization implements PluginHost {
         `Plugin ${plugin.name} requires unsupported API ${plugin.apiVersion}`,
       );
     await plugin.setup(this);
+  }
+  registerSkills(manager: SkillsManager) {
+    if (this.skillsManager) throw new Error("Duplicate skills manager");
+    this.skillsManager = manager;
+  }
+  private async uniqueCwd(settings: Settings, agent: AgentRecord) {
+    if (!this.skillsManager) return settings;
+    const cwd = await realpath(settings.cwd ?? process.cwd());
+    if (!(await stat(cwd)).isDirectory()) throw new ApiError("INVALID_PARAMS", "cwd must be a directory");
+    for (const other of this.agents.values()) {
+      if (other.id === agent.id || other.removedAt) continue;
+      // Missing historical workspaces do not reserve another extant directory.
+      const path = await realpath(other.settings.cwd ?? process.cwd()).catch(() => null);
+      if (path === cwd) throw new ApiError("CWD_CONFLICT", `cwd already belongs to ${other.id}`);
+    }
+    return { ...settings, cwd };
+  }
+  private async prepareSkills(settings: Settings, agent: AgentRecord, caller: Caller, selectionSupplied: boolean, creating: boolean): Promise<SkillsChange | undefined> {
+    if (!this.skillsManager) {
+      if (selectionSupplied && Object.values(settings.skills ?? {}).some(s => s !== "unavailable"))
+        throw new ApiError("SKILLS_DISABLED", "Enable the skills plugin to select skills");
+      return;
+    }
+    return this.skillsManager.prepare(settings, structuredClone(agent), { caller, selectionSupplied, creating });
+  }
+  private commitSettings(agent: AgentRecord, caller: Caller, grant: boolean) {
+    const changes = [agent];
+    if (grant && caller.kind === "client" && this.skillsManager) {
+      let parentId = agent.parentId;
+      while (parentId) {
+        const parent = structuredClone(this.agent(parentId));
+        const skills = { ...parent.settings.skills };
+        let changed = false;
+        for (const [id, state] of Object.entries(agent.settings.skills ?? {})) {
+          if (state !== "unavailable" && (skills[id] !== "available" && skills[id] !== "installed")) {
+            skills[id] = "available"; changed = true;
+          }
+        }
+        if (changed) {
+          parent.settings.skills = skills; parent.revision++; parent.updatedAt = now();
+          changes.push(parent);
+        }
+        parentId = parent.parentId;
+      }
+    }
+    agent.updatedAt = now();
+    this.store.saveAgents(changes);
+    for (const record of changes) this.agents.set(record.id, record);
+    return changes;
+  }
+  private publishSettings(changes: AgentRecord[], createdId?: string) {
+    for (const record of changes) this.emit(record.id === createdId ? "agent.created" : "agent.modified", record, record.id);
+  }
+  private async finalizeSkills(change?: SkillsChange) {
+    try { await change?.committed(); }
+    catch (error) { this.emit("plugin.error", errorShape(error)); }
   }
   registerHarness(harness: HarnessPlugin) {
     if (this.harnesses.has(harness.name))
@@ -169,7 +231,7 @@ export class Organization implements PluginHost {
       settings = settingsSchema.parse(
         await hook(structuredClone(settings), structuredClone(agent)),
       );
-    return { ...settings, cwd: resolve(settings.cwd ?? process.cwd()) };
+    return this.uniqueCwd({ ...settings, cwd: resolve(settings.cwd ?? process.cwd()) }, agent);
   }
   onEvent(handler: (event: Readonly<ServerEvent>) => void | Promise<void>) {
     this.observers.push(handler);
@@ -333,6 +395,7 @@ export class Organization implements PluginHost {
             undefined,
             new ApiError("INTERRUPTED", "Server restarted"),
           );
+      await this.skillsManager?.reconcile([...this.agents.values()].map(a => structuredClone(a)));
       const candidates = [...this.agents.values()].filter(
         (a) => !a.removedAt && !["stopped", "failed"].includes(a.state),
       );
@@ -408,6 +471,7 @@ export class Organization implements PluginHost {
                 caller.kind !== "agent" || this.isDescendant(a.id, caller.id),
             )
             .map((a) => structuredClone(a)),
+          capabilities: { skills: !!this.skillsManager },
           operations: [...this.operations.values()]
             .filter((op) => {
               try {
@@ -477,11 +541,19 @@ export class Organization implements PluginHost {
             updatedAt: now(),
           };
           a.settings = await this.prepareSettings(a.settings, a);
-          this.agents.set(a.id, a);
-          this.saveAgent(a);
+          const change = await this.prepareSkills(a.settings, a, caller, p.settings.skills !== undefined, true);
+          let changes: AgentRecord[];
+          try {
+            await change?.apply();
+            changes = this.commitSettings(a, caller, p.settings.skills !== undefined);
+          } catch (error) {
+            try { await change?.rollback(); } catch (rollback) { this.emit("plugin.error", errorShape(rollback)); }
+            throw error;
+          }
+          await this.finalizeSkills(change);
+          this.publishSettings(changes, a.id);
           op.agentId = a.id;
           this.saveOp(op);
-          this.emit("agent.created", a, a.id);
           await this.start(a, false);
           return structuredClone(a);
         });
@@ -493,13 +565,13 @@ export class Organization implements PluginHost {
             expectedRevision: z.number().int().optional(),
             name: z.string().min(1).max(256).optional(),
             metadata: z.record(z.string(), z.unknown()).optional(),
-            settings: settingsSchema.partial().optional(),
+            settings: settingsPatchSchema.optional(),
           })
           .strict()
           .parse(params);
         this.authorize(caller, p.agentId, true);
         return this.lifecycle(method, p.agentId, p, caller, async () => {
-          const a = this.agent(p.agentId);
+          const a = structuredClone(this.agent(p.agentId));
           if (
             p.expectedRevision !== undefined &&
             p.expectedRevision !== a.revision
@@ -514,20 +586,35 @@ export class Organization implements PluginHost {
               "INVALID_HARNESS",
               `Unknown harness ${settings.harness}`,
             );
+          const change = await this.prepareSkills(settings, a, caller, p.settings?.skills !== undefined, false);
           const launchChanged = !isDeepStrictEqual(settings, a.settings);
           const active = this.runtimes.has(a.id);
-          if (launchChanged && active) await this.stop(a);
-          if (p.name !== undefined) a.name = p.name;
-          if (p.metadata !== undefined) a.metadata = p.metadata;
           const harnessChanged = settings.harness !== a.settings.harness;
-          a.settings = settings;
-          a.revision++;
-          if (harnessChanged) {
-            a.sessionId = crypto.randomUUID();
-            a.sessionNumber++;
+          let changes: AgentRecord[];
+          try {
+            if (launchChanged && active) {
+              await this.stop(this.agent(a.id));
+              a.state = "stopped"; a.generation = null;
+            }
+            await change?.apply();
+            if (p.name !== undefined) a.name = p.name;
+            if (p.metadata !== undefined) a.metadata = p.metadata;
+            a.settings = settings;
+            a.revision++;
+            if (harnessChanged) {
+              a.sessionId = crypto.randomUUID();
+              a.sessionNumber++;
+            }
+            changes = this.commitSettings(a, caller, p.settings?.skills !== undefined);
+          } catch (error) {
+            try { await change?.rollback(); } catch (rollback) { this.emit("plugin.error", errorShape(rollback)); }
+            if (launchChanged && active) {
+              try { await this.start(this.agent(a.id), true); } catch {}
+            }
+            throw error;
           }
-          this.saveAgent(a);
-          this.emit("agent.modified", a, a.id);
+          await this.finalizeSkills(change);
+          this.publishSettings(changes);
           if (launchChanged && active) await this.start(a, !harnessChanged);
           return structuredClone(a);
         });
@@ -766,7 +853,7 @@ export class Organization implements PluginHost {
       {
         name: "organization",
         command: process.execPath,
-        args: [join(import.meta.dir, "mcp-bridge.ts")],
+        args: workerArgs("mcp-bridge"),
         env: [
           { name: "ORG_SOCKET", value: this.socketPath },
           { name: "ORG_TOKEN", value: token },
@@ -800,6 +887,10 @@ export class Organization implements PluginHost {
     };
     let rt: Runtime | undefined;
     try {
+      if (!this.skillsManager && Object.values(a.settings.skills ?? {}).some(s => s !== "unavailable"))
+        throw new ApiError("SKILLS_DISABLED", "Enable the skills plugin before launching this agent");
+      await this.uniqueCwd(a.settings, a);
+      context.skillPaths = await this.skillsManager?.launchPaths(structuredClone(a)) ?? [];
       let spec = await deadline(
         Promise.resolve(harness.launch(context)),
         this.limits.startTimeoutMs,
@@ -811,6 +902,11 @@ export class Organization implements PluginHost {
           this.limits.startTimeoutMs,
           "Launch hook timed out",
         );
+      if (this.skillsManager) {
+        const checked = await this.uniqueCwd({ ...a.settings, cwd: spec.cwd ?? a.settings.cwd }, a);
+        if (checked.cwd !== await realpath(a.settings.cwd ?? process.cwd()))
+          throw new ApiError("CWD_CONFLICT", "Harness cwd must match the managed workspace");
+      }
       spec = {
         ...spec,
         cwd: spec.cwd ?? a.settings.cwd ?? process.cwd(),

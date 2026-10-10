@@ -39,6 +39,11 @@ export class Store {
       .query("INSERT OR REPLACE INTO agents VALUES (?, ?)")
       .run(agent.id, JSON.stringify(agent));
   }
+  saveAgents(agents: AgentRecord[]) {
+    this.db.transaction(() => {
+      for (const agent of agents) this.saveAgent(agent);
+    })();
+  }
   saveOperation(op: Operation) {
     this.db
       .query("INSERT OR REPLACE INTO operations VALUES (?, ?)")

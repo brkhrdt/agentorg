@@ -1,5 +1,11 @@
 import { z } from "zod";
 
+export const skillStatesSchema = z.record(
+  z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(64),
+  z.enum(["unavailable", "available", "installed"]),
+);
+export type SkillStates = z.infer<typeof skillStatesSchema>;
+
 export const settingsSchema = z
   .object({
     harness: z.string().min(1),
@@ -8,8 +14,13 @@ export const settingsSchema = z
     cwd: z.string().min(1).optional(),
     env: z.record(z.string(), z.string()).optional(),
     options: z.record(z.string(), z.unknown()).default({}),
+    skills: skillStatesSchema.optional(),
   })
   .strict();
+// Patches must not apply creation defaults (notably options: {}).
+export const settingsPatchSchema = settingsSchema.partial().extend({
+  options: z.record(z.string(), z.unknown()).optional(),
+});
 export type Settings = z.infer<typeof settingsSchema>;
 export type AgentState =
   | "starting"
@@ -87,7 +98,9 @@ export function errorShape(error: unknown): ApiErrorShape {
         ? error.code
         : error instanceof z.ZodError
           ? "INVALID_PARAMS"
-          : "INTERNAL",
+          : error instanceof Error && typeof (error as any).code === "string" && /^[A-Z][A-Z_]+$/.test((error as any).code)
+            ? (error as any).code
+            : "INTERNAL",
     message: error instanceof Error ? error.message : String(error),
   };
 }
