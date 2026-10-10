@@ -165,13 +165,15 @@ Load `--plugin ../agentorg-plugin-pi-agent/src/index.ts` in source mode, or its 
 
 Harness-specific options, resource loading, credentials and session details belong to the separate harness plugin's documentation. Feature plugins own their policy, external storage, migration and readiness checks; core never interprets their namespaces.
 
-### cwd plugin
+### cwd plugin (separate repository)
 
-Enable strict workspace nesting with the optional **`cwd`** plugin:
+Enable strict workspace nesting with the optional **`cwd`** plugin from [agentorg-plugin-unique-cwd](../agentorg-plugin-unique-cwd/README.md):
 
 ```sh
-bun start --plugin ../agentorg-plugin-pi-agent/src/index.ts --plugin ./src/plugins/cwd.ts
+bun start --plugin ../agentorg-plugin-pi-agent/src/index.ts --plugin ../agentorg-plugin-unique-cwd/src/index.ts
 ```
+
+For compiled servers, build that repository and load `../agentorg-plugin-unique-cwd/dist/index.js`. The runtime plugin name (`cwd`) and persisted `settings.cwd` remain unchanged; replace the old `./src/plugins/cwd.ts` load path. Core does not enforce nesting without the plugin.
 
 MCP `child_create` gains a **required top-level `cwd`** argument (use this instead of `settings.cwd`):
 
