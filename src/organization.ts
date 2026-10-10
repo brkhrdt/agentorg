@@ -417,7 +417,7 @@ export class Organization implements PluginHost {
       throw new ApiError("FORBIDDEN", "Expired agent capability");
     return { kind: "agent", id };
   }
-  async initialize(recover = false) {
+  async initialize(recover = true) {
     await this.serialize(async () => {
       for (const op of this.operations.values())
         if (!terminal(op))

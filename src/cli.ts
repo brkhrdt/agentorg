@@ -13,13 +13,14 @@ const { values } = parseArgs({
     "data-dir": { type: "string", default: ".org" },
     config: { type: "string" },
     plugin: { type: "string", multiple: true },
-    recover: { type: "boolean", default: false },
+    recover: { type: "boolean", default: true },
+    "no-recover": { type: "boolean", default: false },
     help: { type: "boolean" },
   },
 });
 if (values.help) {
   console.log(
-    "agentorg [--data-dir .org] [--socket PATH] [--config limits.json] [--recover] [--plugin ./plugin.ts]",
+    "agentorg [--data-dir .org] [--socket PATH] [--config limits.json] [--no-recover] [--plugin ./plugin.ts]",
   );
   process.exit(0);
 }
@@ -48,7 +49,7 @@ const server = await OrganizationServer.start({
   socketPath: values.socket ?? join(dataDir, "server.sock"),
   limits,
   plugins,
-  recover: values.recover,
+  recover: values.recover && !values["no-recover"],
 });
 console.error(
   `Organization server listening on ${server.organization.socketPath}`,

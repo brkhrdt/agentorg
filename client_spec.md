@@ -341,7 +341,7 @@ interface CreateAgentParams {
   metadata?: Record<string, unknown>; // Default {}.
   settings: {
     harness: string;
-    model: string;
+    model?: string;
     provider?: string;
     cwd?: string;
     env?: Record<string, string>;
@@ -594,7 +594,7 @@ All `data` shapes below are subject to §4.4 truncation. Optional fields with un
 
 | Type | `data` | Notes |
 |---|---|---|
-| `server.ready` | `{recover: boolean, limits: Limits}` | Startup-only event, not a greeting; `recover` defaults false |
+| `server.ready` | `{recover: boolean, limits: Limits}` | Startup-only event, not a greeting; `recover` defaults true |
 | `server.stopped` | `{}` | Graceful shutdown; may be followed by EOF, not guaranteed on crash |
 | `agent.created` | `AgentRecord` | Record allocated, process not necessarily ready; envelope generation omitted |
 | `agent.state` | `{state: AgentState, revision: number, error?: string}` | Current generation in envelope while set; cleared generation is represented by omission |
@@ -812,8 +812,8 @@ Plugin error codes/types may extend this list. Treat codes as machine-readable s
 The server persists agent records, operations, and events in SQLite. Removal and session replacement do not delete existing records/transcripts. On server restart:
 
 - Previously queued/running operations become `stopped` with `INTERRUPTED`; they are never silently resumed.
-- Previously active, unremoved agents become stopped by default.
-- With server `--recover`, those agents are started parent-first. Individual startup failures mark agents failed and recovery continues for other descendants.
+- Previously active, unremoved agents are recovered by default; `--no-recover` leaves them stopped.
+- During recovery, those agents are started parent-first. Individual startup failures mark agents failed and recovery continues for other descendants.
 - Agents already stopped/failed, and removed agents, are not automatically recovered.
 
 Clients should refresh after reconnect rather than assume their last running indicators are still accurate.

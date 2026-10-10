@@ -414,7 +414,7 @@ test("permission events resolve and cancellation releases pending permission", a
   expect((await client.wait(cancelled)).status).toBe("stopped");
 });
 
-test("startup interruption policy recovers parent-before-child and stops pending operations", async () => {
+test.each([undefined, true, false])("startup interruption policy (recover=%s) handles pending work and eligible agents", async (recover) => {
   const dir = mkdtempSync(join(tmpdir(), "org-recovery-"));
   dirs.push(dir);
   const store = new Store(join(dir, "organization.sqlite"));
@@ -435,6 +435,9 @@ test("startup interruption policy recovers parent-before-child and stops pending
   });
   store.saveAgent(record("root", null));
   store.saveAgent(record("child", "root"));
+  store.saveAgent({ ...record("stopped", "root"), state: "stopped" });
+  store.saveAgent({ ...record("failed", "root"), state: "failed" });
+  store.saveAgent({ ...record("removed", "root"), removedAt: now() });
   store.saveOperation({
     id: "interrupted",
     caller: { kind: "client", id: "old" },
@@ -449,21 +452,26 @@ test("startup interruption policy recovers parent-before-child and stops pending
     dataDir: dir,
     socketPath: join(dir, "server.sock"),
     plugins: [fixture],
-    recover: true,
+    recover,
     limits: { stopTimeoutMs: 100 },
   });
   servers.push(server);
   expect(server.organization.operations.get("interrupted")?.error?.code).toBe(
     "INTERRUPTED",
   );
-  expect(server.organization.agents.get("root")?.state).toBe("idle");
-  expect(server.organization.agents.get("child")?.state).toBe("idle");
+  expect(server.organization.agents.get("root")?.state).toBe(recover === false ? "stopped" : "idle");
+  expect(server.organization.agents.get("child")?.state).toBe(recover === false ? "stopped" : "idle");
+  expect(server.organization.agents.get("stopped")?.state).toBe("stopped");
+  expect(server.organization.agents.get("failed")?.state).toBe("failed");
+  expect(server.organization.agents.get("removed")?.state).toBe("running");
   const starts = server.organization.store
     .history(0, 1000)
     .events.filter(
       (e) => e.type === "agent.state" && (e.data as any).state === "starting",
     );
-  expect(starts.map((e) => e.agentId)).toEqual(["root", "child"]);
+  expect(starts.map((e) => e.agentId)).toEqual(recover === false ? [] : ["root", "child"]);
+  const ready = server.organization.store.history(0, 1000).events.find(e => e.type === "server.ready");
+  expect((ready?.data as any).recover).toBe(recover !== false);
 });
 
 test("generation fencing rejects late updates and terminalizes old prompt work", async () => {

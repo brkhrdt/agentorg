@@ -15,10 +15,10 @@ bun start                         # .org/server.sock and .org/organization.sqlit
 # install/configure Pi separately, and authenticate with pi /login.
 bun start --plugin ../agentorg-plugin-pi-agent/src/index.ts
 # Optional:
-bun start --data-dir /tmp/my-org --recover --config limits.json --plugin ./my-plugin.ts
+bun start --data-dir /tmp/my-org --config limits.json --plugin ./my-plugin.ts
 ```
 
-`--recover` restarts previously active agents, parent before child; default recovery stops them. Graceful server shutdown uses SIGINT/SIGTERM. A deployment lock prevents multiple servers sharing a database. Only an owned, stale socket inside the data directory is automatically removed. If placing the socket elsewhere, remove a stale socket yourself after verifying no server is running.
+Previously active agents restart by default, parent before child. Use `--no-recover` to leave them stopped; `--recover` remains accepted for compatibility, but `--no-recover` takes precedence. Graceful server shutdown uses SIGINT/SIGTERM. A deployment lock prevents multiple servers sharing a database. Only an owned, stale socket inside the data directory is automatically removed. If placing the socket elsewhere, remove a stale socket yourself after verifying no server is running.
 
 ### Standalone binary
 
@@ -204,7 +204,7 @@ This is launch-time workspace validation, **not a filesystem sandbox**. Agents s
 
 Oversized prompts/queues/trees/process counts are rejected. Oversized stored results/event data use `{truncated, originalBytes, preview}`; prompt text is additionally bounded during streaming. Large snapshots should use conservative record limits; output beyond a client's buffer cap disconnects that client. History prunes oldest events and terminal operations only, never active operations or agent records. Pruned operations return `NOT_FOUND`. Pi session files and workspaces are retained indefinitely; external archival/deletion is an operator decision.
 
-SQLite uses WAL and synchronous FULL writes; history is not erased by removal or session replacement. At startup, all pending operations become `stopped` with `INTERRUPTED`, never resumed. Previously active agents become stopped unless `--recover` is selected. Recovery failures mark that agent failed and continue with descendants; already stopped/failed or removed agents are not automatically restarted. Abrupt process failure is contained to its agent, not descendants.
+SQLite uses WAL and synchronous FULL writes; history is not erased by removal or session replacement. At startup, all pending operations become `stopped` with `INTERRUPTED`, never resumed. Previously active agents restart parent-first by default, unless `--no-recover` is selected to leave them stopped. Recovery failures mark that agent failed and continue with descendants; already stopped/failed or removed agents are not automatically restarted. Abrupt process failure is contained to its agent, not descendants.
 
 No authentication, multi-user protection, remote networking, default workspace-subdirectory enforcement, or filesystem sandbox is provided. The optional `cwd` plugin adds workspace-subdirectory validation, not sandboxing. Socket/database files are private to the OS user. Hierarchy permissions govern MCP calls; agents with ordinary shell access share that user's privileges and are not adversarially isolated from the public client socket. Workspace containment/isolation belongs in a trusted plugin.
 

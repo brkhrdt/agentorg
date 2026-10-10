@@ -45,6 +45,7 @@ export interface ServerOptions {
   dataDir: string;
   limits?: Partial<Limits>;
   plugins: ServerPlugin[];
+  /** Restart previously active agents on startup (default true). */
   recover?: boolean;
 }
 
