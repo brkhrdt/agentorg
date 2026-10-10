@@ -2,29 +2,65 @@
 
 A single-user Bun/TypeScript service managing a tree of agent processes. Clients use JSONL over a Unix socket; harnesses use **ACP v1** (`@agentclientprotocol/sdk`); agents manage descendants using **MCP** (`@modelcontextprotocol/sdk`). SQLite persists agents, operations, and sequenced history.
 
-The first harness is **Pi**. A server plugin starts an ACP adapter, which launches **`pi --mode rpc`**. A Pi extension registers the organization's real MCP stdio server. The core never speaks Pi RPC and can run other ACP harness plugins in the same tree.
+The core is harness-neutral and registers **no built-in harnesses**. Load trusted plugins explicitly. The separate [`@agentorg/plugin-pi-agent`](../agentorg-plugin-pi-agent/README.md) provides the Pi RPC-to-ACP adapter and organization MCP extension; other ACP harnesses can run in the same tree.
 
 ## Run
 
-Requires Unix, Bun, and Pi **1.0.2+** with MCP registration and `agent_settled` RPC support. Node 22.19+ is required by Pi. Tested with Bun 1.4.2 and Pi 1.0.2.
+Requires Unix and Bun. Pi is optional and required only when using the separate Pi plugin (Pi 1.0.2+, Node 22.19+).
 
 ```sh
 bun install --frozen-lockfile
-# Install/configure pi separately if it is not already on PATH.
-# Authenticate with your model provider using pi /login.
-bun start                         # .org/server.sock and .org/organization.sqlite
+bun start                         # .org/server.sock and .org/organization.sqlite; no harnesses
+# To enable Pi: install dependencies in ../agentorg-plugin-pi-agent first,
+# install/configure Pi separately, and authenticate with pi /login.
+bun start --plugin ../agentorg-plugin-pi-agent/src/index.ts
 # Optional:
 bun start --data-dir /tmp/my-org --recover --config limits.json --plugin ./my-plugin.ts
 ```
 
 `--recover` restarts previously active agents, parent before child; default recovery stops them. Graceful server shutdown uses SIGINT/SIGTERM. A deployment lock prevents multiple servers sharing a database. Only an owned, stale socket inside the data directory is automatically removed. If placing the socket elsewhere, remove a stale socket yourself after verifying no server is running.
 
-### Live demonstration
+### Standalone binary
 
-Start a **fresh organization** (only one active root is permitted), then:
+Build with **Bun 1.4.3+** (Unix):
 
 ```sh
-bun demo .org/server.sock /tmp/org-demo-workspace
+bun install --frozen-lockfile
+bun run build                     # dist/agentorg
+./dist/agentorg --help
+./dist/agentorg --data-dir /absolute/path/my-org
+# Optional cross-compilation:
+bun run build --target=bun-linux-x64
+# Other examples: bun-linux-arm64, bun-darwin-arm64, bun-linux-x64-baseline
+```
+
+Distribute **only `dist/agentorg`**; the destination does not need Bun, this
+repository, or `node_modules`. Build for the destination OS/CPU (use `-baseline`
+for older x64 CPUs). Windows is not supported. The binary embeds SQLite, the
+generic MCP bridge, re-executing itself for that internal worker. It contains
+no Pi code or Pi SDK dependency. For Pi, build the separate plugin and ship
+`dist/index.js` plus its adjacent `dist/pi-acp` executable, then pass
+`--plugin /path/to/pi-plugin/index.js`. That adapter does not need Bun on PATH.
+
+Install/configure Pi and its Node runtime separately when using the plugin,
+or set the agent's `options.executable` to Pi's path.
+Provider credentials, workspace files, configuration, and persistent data are
+not bundled. Custom `--plugin` modules remain external trusted files. For compiled hosts,
+bundle their npm dependencies into the external plugin (`bun build --target=bun`)
+instead of relying on runtime package resolution; ship that module separately. Paths and CLI flags work
+the same as source mode, with relative paths resolved from the current directory.
+
+`bun run test:binary` tests a relocated generic host, an explicit ACP fixture
+plugin and the core MCP bridge, and verifies that Pi is not implicitly registered.
+Pi adapter tests live in the separate plugin repo.
+
+### Live demonstration
+
+Start a **fresh organization** with the Pi plugin (only one active root is permitted), then run the demo from the plugin repository:
+
+```sh
+cd ../agentorg-plugin-pi-agent
+bun demo /absolute/path/to/.org/server.sock /tmp/org-demo-workspace
 ```
 
 The client creates a Pi root using **`openai-codex/gpt-6-luna`**, subscribes to events, and asks it to create two Pi children: a coder writes `add.ts`; a tester writes `add.test.ts`. The root sends both tasks, waits for their operations, runs the tests, and reports the result. JSONL lifecycle, message, tool, and operation events stream to stdout. Agents and files remain available afterward.
@@ -171,9 +207,11 @@ No authentication, multi-user protection, remote networking, default workspace-s
 ## Tests
 
 ```sh
-bun run check                # includes the Pi extension's types
+bun run check
 bun test                     # deterministic ACP subprocess + MCP integration tests; no model calls
-bun run test:live            # opt-in real Pi/MCP delegation; uses ONLY gpt-6-luna
+bun run test:binary
+# Pi extension, adapter, offline loading and opt-in live tests:
+# cd ../agentorg-plugin-pi-agent && bun test
 ```
 
-Live testing needs working `openai-codex` credentials. It validates two child processes, their code/tests, ACP events, retained restart context, and session replacement. Model-backed demos/tests have no model fallback. Live agent behavior is inherently nondeterministic; failures include coordination diagnostics rather than silently switching models.
+The separate Pi plugin's `bun run test:live` needs working `openai-codex` credentials and uses only `gpt-6-luna`. It validates two child processes, their code/tests, ACP events, retained restart context, and session replacement. Model-backed demos/tests have no model fallback. Live agent behavior is inherently nondeterministic; failures include coordination diagnostics rather than silently switching models.

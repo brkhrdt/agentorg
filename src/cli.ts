@@ -4,7 +4,6 @@ import { readFile } from "node:fs/promises";
 import { z } from "zod";
 import { pathToFileURL } from "node:url";
 import { OrganizationServer } from "./server.ts";
-import { piPlugin } from "./plugins/pi.ts";
 import type { ServerPlugin } from "./plugin.ts";
 import { defaults, type Limits } from "./types.ts";
 
@@ -20,7 +19,7 @@ const { values } = parseArgs({
 });
 if (values.help) {
   console.log(
-    "bun src/cli.ts [--data-dir .org] [--socket PATH] [--config limits.json] [--recover] [--plugin ./plugin.ts]",
+    "agentorg [--data-dir .org] [--socket PATH] [--config limits.json] [--recover] [--plugin ./plugin.ts]",
   );
   process.exit(0);
 }
@@ -41,7 +40,7 @@ if (values.config) {
     JSON.parse(await readFile(values.config, "utf8")),
   ) as Partial<Limits>;
 }
-const plugins: ServerPlugin[] = [piPlugin];
+const plugins: ServerPlugin[] = [];
 for (const path of values.plugin ?? [])
   plugins.push((await import(pathToFileURL(resolve(path)).href)).default);
 const server = await OrganizationServer.start({
