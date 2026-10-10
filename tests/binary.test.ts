@@ -22,11 +22,18 @@ test.skipIf(!process.env.ORG_BINARY)("standalone generic host, explicit ACP plug
     expect(await help.exited).toBe(0);
     const plugin = join(dir, "fixture-plugin.js");
     const bridgeFile = join(dir, 'bridge.json');
+    const launchFile = join(dir, 'launch.json');
     await writeFile(plugin, `import {writeFileSync} from 'node:fs';
 export default {apiVersion:1,name:'fixture',setup(host){host.registerHarness({name:'fixture',launch(ctx){
 writeFileSync(${JSON.stringify(bridgeFile)},JSON.stringify(ctx.mcpServers[0]));
 return {command:${JSON.stringify(process.execPath)},args:[${JSON.stringify(join(import.meta.dir, 'fixtures/agent.ts'))}],env:{...process.env,ORG_FIXTURE:'{}'}};
-}})}};`);
+}});
+host.registerSettings({namespace:'demo',validate(value){if(typeof value!=='object')throw new Error('demo object required');return value;}});
+host.registerCapability('demo',{settingsNamespace:'demo'});
+host.prepareLaunch(ctx=>{ctx.env.DEMO_RESOURCE='explicit';});
+host.beforeLaunch(spec=>({...spec,env:{...spec.env,DEMO_TRANSFORM:'applied'}}));
+host.validateLaunch(spec=>{writeFileSync(${JSON.stringify(launchFile)},JSON.stringify(spec));});
+}};`);
     const dataDir = join(dir, "data");
     const socket = join(dataDir, "server.sock");
     server = Bun.spawn([binary, "--data-dir", dataDir, '--plugin', plugin], { cwd: dir, env: { PATH: dir }, stdout: "ignore", stderr: "pipe" });
@@ -39,10 +46,14 @@ return {command:${JSON.stringify(process.execPath)},args:[${JSON.stringify(join(
     expect(unknown.status).toBe('failed');
     expect(unknown.error?.code).toBe('INVALID_HARNESS');
     const creation = await client.wait(await client.request<Operation>("agent.create", {
-      settings: { harness: "fixture", model: "test-model" },
+      settings: { harness: "fixture", model: "test-model", extensions: { demo: { selected: true } } },
     }));
     expect(creation.status).toBe("completed");
     const agent = creation.result as AgentRecord;
+    const transformed = JSON.parse(await readFile(launchFile, 'utf8'));
+    expect(transformed.env.DEMO_RESOURCE).toBe('explicit');
+    expect(transformed.env.DEMO_TRANSFORM).toBe('applied');
+    expect(agent.settings.extensions).toEqual({ demo: { selected: true } });
     const prompt = await client.wait(await client.request<Operation>("agent.prompt", { agentId: agent.id, text: "hello" }));
     expect(prompt.status).toBe("completed");
     const bridge = JSON.parse(await readFile(bridgeFile, 'utf8'));

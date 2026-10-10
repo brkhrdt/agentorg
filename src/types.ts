@@ -1,11 +1,5 @@
 import { z } from "zod";
 
-export const skillStatesSchema = z.record(
-  z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(64),
-  z.enum(["unavailable", "available", "installed"]),
-);
-export type SkillStates = z.infer<typeof skillStatesSchema>;
-
 export const settingsSchema = z
   .object({
     harness: z.string().min(1),
@@ -14,7 +8,7 @@ export const settingsSchema = z
     cwd: z.string().min(1).optional(),
     env: z.record(z.string(), z.string()).optional(),
     options: z.record(z.string(), z.unknown()).default({}),
-    skills: skillStatesSchema.optional(),
+    extensions: z.record(z.string(), z.unknown()).optional(),
   })
   .strict();
 // Patches must not apply creation defaults (notably options: {}).

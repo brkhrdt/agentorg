@@ -153,9 +153,9 @@ Pi confirm/select dialogs become ACP permission requests. Clients choose with `p
 
 ## Plugins
 
-Trusted TypeScript modules export `ServerPlugin` with `apiVersion: 1`, `name`, and `setup(host)`; load explicit paths with repeatable `--plugin`. API types live in `src/plugin.ts`; incompatible versions and duplicate names fail startup. v1 changes will be additive; breaking changes require a new version.
+Trusted TypeScript modules export `ServerPlugin` with `apiVersion: 1`, `name`, and `setup(host)`; load explicit paths with repeatable `--plugin`. API types live in `src/plugin.ts`; incompatible versions and duplicate names fail startup. The generic extension APIs are additive within v1; plugins using the removed pre-1.0 feature-manager API must upgrade in this coordinated contract replacement. See [extension contract and commit boundaries](EXTENSIONS.md).
 
-Hooks register ACP harnesses, namespaced client endpoints, MCP tools, event observers, settings/launch transformations, and shutdown handlers. `transformTool` augments an existing tool's schema/execution; `beforeSettings` validates/transforms create/modify settings inside the lifecycle queue before persistence or stopping a running agent. Launch specs default to the server cwd/environment (plus agent settings). Launch hooks can customize command/arguments, env, cwd, wrappers/containers, and bounded `gracefulStop`. A stop still closes stdin, escalates to SIGTERM/SIGKILL, and kills remaining members of the process group. See `examples/acp-plugin.ts`.
+Hooks register ACP harnesses, namespaced client endpoints/settings/capabilities, MCP tools, event observers, lifecycle transaction participants, settings/launch transformations, and shutdown handlers. `settings.extensions` round-trips plugin-owned JSON; supplied namespace values replace only that namespace, while omitted namespaces remain unchanged. `beforeMutation` may request atomic multi-record settings updates with compensation/finalization. `prepareLaunch` supplies env/MCP configuration before harness launch, and `validateLaunch` checks the final resolved spec. Unknown persisted extension/legacy data is retained but blocks launch/modification until its owning plugin is loaded. Discover optional features through `snapshot.capabilities.plugins`. `transformTool` augments an existing tool's schema/execution; `beforeSettings` validates/transforms create/modify settings inside the lifecycle queue before persistence or stopping a running agent. Launch specs default to the server cwd/environment (plus agent settings). Launch hooks can customize command/arguments, env, cwd, wrappers/containers, and bounded `gracefulStop`. A stop still closes stdin, escalates to SIGTERM/SIGKILL, and kills remaining members of the process group. See `examples/acp-plugin.ts`.
 
 Observers run without blocking the transport; errors become `plugin.error`, and events emitted by observers are not re-observed recursively. Endpoint/tool failures are isolated per request. Launch failures fail only the affected agent/operation. Plugin setup failures fail startup; shutdown hooks have deadlines. **Plugins are trusted in-process code**, not fault/security sandboxes: a plugin that blocks the event loop, exits the process, or tampers with server state cannot be isolated.
 
@@ -163,25 +163,7 @@ Observers run without blocking the transport; errors become `plugin.error`, and 
 
 Load `--plugin ../agentorg-plugin-pi-agent/src/index.ts` in source mode, or its built `dist/index.js` with the adjacent compiled `pi-acp` adapter in binary deployments. It uses the public `LaunchContext.mcpServers` specs, not core worker paths, and has no runtime imports from core. Existing `harness: "pi"` records and session directories are unchanged; load this plugin to restart/recover them. Without it, Pi is an unknown/unavailable harness (`INVALID_HARNESS` on creation, `START_FAILED` for restart operations), without deleting persisted data. See [installation and runtime overrides](../agentorg-plugin-pi-agent/README.md).
 
-Pi launch options: `thinking`, `appendSystemPrompt`, `tools` (tool selection), `executable` (default `pi`). Models must be exact Pi model IDs, not fuzzy patterns; the adapter verifies the selected model/provider and refuses fallback. Pi sessions are stored in `.org/sessions/<agentId>/<sessionNumber>/`; restart reopens the session, replacement writes a separate session directory. The extension loads explicitly alongside Pi's built-in MCP extension. Discovered extensions/skills/templates/themes and project-local configuration are disabled; user-level MCP settings and credentials remain Pi-managed. Reserve the MCP server name `organization` for this extension.
-
-### Skills plugin
-
-Load the separately installed `@agentorg/plugin-skills` module:
-
-```sh
-bun start --plugin ../agentorg-plugin-pi-agent/src/index.ts --plugin ../agentorg-plugin-skills/src/index.ts
-# Compiled host: build both plugins first.
-./dist/agentorg --plugin ../agentorg-plugin-pi-agent/dist/index.js --plugin ../agentorg-plugin-skills/dist/skills.js
-```
-
-It adds client `skills.add/list`, agent MCP `skills_list`, and complete selections in **`settings.skills`** (`{alpha: "installed", beta: "available"}`). Omission on modification preserves selections; `{}` clears them. Public-client grants atomically add availability to every ancestor, without downgrading installed states. MCP grants require the caller's available/installed skills. Snapshots advertise `capabilities.skills`; the TUI enables its skills editor only when true.
-
-All nonremoved agents need distinct canonical cwd paths while enabled, including stopped/failed agents. The optional cwd plugin composes in either load order. Installations use `.agents/skills`; obsolete clones and dirty/untracked files are retained outside discovery, never deleted/merged automatically. Catalog, journal and fetch retries use a separate organization-scoped SQLite database under the OS user's `~/.agentorg/skills/`. See [plugin operations and source policy](../agentorg-plugin-skills/README.md) and [client API skills contract](client_spec.md#14-optional-skills-plugin).
-
-Pi receives only explicit installed `SKILL.md` paths via `LaunchContext.skillPaths`, with `--no-skills` retained. Other harnesses must consume those paths themselves. Disabling the plugin preserves selections/files but rejects launches with nonempty selections (`SKILLS_DISABLED`). Old records omit the optional field; no core table migration is needed. Skill-only patches preserve omitted Pi options.
-
-API-v1 hosts now expose the narrow `registerSkills` manager contract. Preparation runs inside the lifecycle queue; staged changes apply after the old process stops, compensate on pre-commit failure, and finalize after target/ancestor records commit. Finalization or launch failure cannot roll back committed records. This is not a filesystem/SQLite distributed transaction. Plugin-owned SQLite remains separate from core storage.
+Harness-specific options, resource loading, credentials and session details belong to the separate harness plugin's documentation. Feature plugins own their policy, external storage, migration and readiness checks; core never interprets their namespaces.
 
 ### cwd plugin
 

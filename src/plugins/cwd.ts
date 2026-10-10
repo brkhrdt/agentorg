@@ -116,6 +116,11 @@ export const cwdPlugin: ServerPlugin = {
       const settings = await validate(agent.settings, agent, false);
       return { ...spec, cwd: settings.cwd };
     });
+    host.validateLaunch(async (spec, { agent }) => {
+      const settings = await validate(agent.settings, agent, false);
+      if (await directory(spec.cwd!) !== settings.cwd)
+        throw new ApiError("INVALID_PARAMS", "Final launch cwd violates workspace policy");
+    });
   },
 };
 

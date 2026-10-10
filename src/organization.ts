@@ -1,5 +1,4 @@
 import { resolve, join } from "node:path";
-import { realpath, stat } from "node:fs/promises";
 import { isDeepStrictEqual } from "node:util";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { z } from "zod";
@@ -14,8 +13,9 @@ import type {
   PluginHost,
   ServerPlugin,
   ToolDefinition,
-  SkillsManager,
-  SkillsChange,
+  ExtensionSettings,
+  MutationContext,
+  MutationChange,
 } from "./plugin.ts";
 import {
   ApiError,
@@ -90,7 +90,13 @@ export class Organization implements PluginHost {
       agent: Readonly<AgentRecord>,
     ) => Settings | Promise<Settings>
   > = [];
-  private skillsManager?: SkillsManager;
+  private extensionSettings = new Map<string, ExtensionSettings>();
+  private capabilities: Record<string, unknown> = {};
+  private mutationHooks: Array<(context: MutationContext) => MutationChange | void | Promise<MutationChange | void>> = [];
+  private initializeHooks: Array<(agents: Readonly<AgentRecord>[]) => void | Promise<void>> = [];
+  private contextHooks: Array<(context: LaunchContext) => void | Promise<void>> = [];
+  private launchValidators: Array<(spec: LaunchSpec, context: LaunchContext) => void | Promise<void>> = [];
+  private mutationContext = new AsyncLocalStorage<boolean>();
   private shutdownHooks: Array<() => void | Promise<void>> = [];
   private permissions = new Map<string, Permission>();
   private tail: Promise<unknown> = Promise.resolve();
@@ -121,50 +127,73 @@ export class Organization implements PluginHost {
       );
     await plugin.setup(this);
   }
-  registerSkills(manager: SkillsManager) {
-    if (this.skillsManager) throw new Error("Duplicate skills manager");
-    this.skillsManager = manager;
+  registerSettings(extension: ExtensionSettings) {
+    if (!/^[a-z][a-z0-9.-]*$/.test(extension.namespace) || this.extensionSettings.has(extension.namespace))
+      throw new Error(`Invalid/duplicate settings namespace ${extension.namespace}`);
+    this.extensionSettings.set(extension.namespace, extension);
   }
-  private async uniqueCwd(settings: Settings, agent: AgentRecord) {
-    if (!this.skillsManager) return settings;
-    const cwd = await realpath(settings.cwd ?? process.cwd());
-    if (!(await stat(cwd)).isDirectory()) throw new ApiError("INVALID_PARAMS", "cwd must be a directory");
-    for (const other of this.agents.values()) {
-      if (other.id === agent.id || other.removedAt) continue;
-      // Missing historical workspaces do not reserve another extant directory.
-      const path = await realpath(other.settings.cwd ?? process.cwd()).catch(() => null);
-      if (path === cwd) throw new ApiError("CWD_CONFLICT", `cwd already belongs to ${other.id}`);
+  registerCapability(namespace: string, value: unknown) {
+    if (Object.hasOwn(this.capabilities, namespace)) throw new Error(`Duplicate capability ${namespace}`);
+    Object.defineProperty(this.capabilities, namespace, { value: structuredClone(value), enumerable: true });
+  }
+  beforeMutation(handler: (context: MutationContext) => MutationChange | void | Promise<MutationChange | void>) { this.mutationHooks.push(handler); }
+  onInitialize(handler: (agents: Readonly<AgentRecord>[]) => void | Promise<void>) { this.initializeHooks.push(handler); }
+  prepareLaunch(handler: (context: LaunchContext) => void | Promise<void>) { this.contextHooks.push(handler); }
+  validateLaunch(handler: (spec: LaunchSpec, context: LaunchContext) => void | Promise<void>) { this.launchValidators.push(handler); }
+  private validateSettings(input: unknown): Settings {
+    const parsed = settingsSchema.safeParse(input);
+    if (!parsed.success) throw new ApiError("EXTENSION_REQUIRED", "Settings contain unsupported or invalid fields; load their owning plugin or migrate the record");
+    const settings = parsed.data;
+    for (const [namespace, value] of Object.entries(settings.extensions ?? {})) {
+      const extension = this.extensionSettings.get(namespace);
+      if (!extension) throw new ApiError("EXTENSION_REQUIRED", `Enable the ${namespace} plugin before modifying or launching this agent`);
+      settings.extensions![namespace] = extension.validate(value);
     }
-    return { ...settings, cwd };
+    return settings;
   }
-  private async prepareSkills(settings: Settings, agent: AgentRecord, caller: Caller, selectionSupplied: boolean, creating: boolean): Promise<SkillsChange | undefined> {
-    if (!this.skillsManager) {
-      if (selectionSupplied && Object.values(settings.skills ?? {}).some(s => s !== "unavailable"))
-        throw new ApiError("SKILLS_DISABLED", "Enable the skills plugin to select skills");
-      return;
+  private launchIdentity(settings: Settings) {
+    const extensions = Object.fromEntries(Object.entries(settings.extensions ?? {}).map(([name, value]) =>
+      [name, this.extensionSettings.get(name)?.launchKey ? this.extensionSettings.get(name)!.launchKey!(value) : value]));
+    // Absent namespaces and namespaces with no launch resources have the same identity.
+    for (const [name, extension] of this.extensionSettings) {
+      if (extension.launchKey && !Object.hasOwn(extensions, name)) extensions[name] = extension.launchKey(undefined);
     }
-    return this.skillsManager.prepare(settings, structuredClone(agent), { caller, selectionSupplied, creating });
+    return { ...settings, extensions };
   }
-  private commitSettings(agent: AgentRecord, caller: Caller, grant: boolean) {
-    const changes = [agent];
-    if (grant && caller.kind === "client" && this.skillsManager) {
-      let parentId = agent.parentId;
-      while (parentId) {
-        const parent = structuredClone(this.agent(parentId));
-        const skills = { ...parent.settings.skills };
-        let changed = false;
-        for (const [id, state] of Object.entries(agent.settings.skills ?? {})) {
-          if (state !== "unavailable" && (skills[id] !== "available" && skills[id] !== "installed")) {
-            skills[id] = "available"; changed = true;
-          }
+  private async prepareMutation(context: MutationContext) {
+    const changes: MutationChange[] = [];
+    const related = new Map<string, AgentRecord>();
+    try {
+      for (const hook of this.mutationHooks) {
+        const change = await this.mutationContext.run(true, () => hook(structuredClone(context)));
+        if (!change) continue;
+        changes.push(change);
+        if (change.settings) context.agent = { ...context.agent, settings: this.validateSettings(change.settings) };
+        for (const update of change.updates ?? []) {
+          if (update.agentId === context.agent.id || related.has(update.agentId)) throw new ApiError("CONFLICT", "Duplicate transaction target");
+          const record = structuredClone(this.agent(update.agentId));
+          if (record.revision !== update.expectedRevision) throw new ApiError("CONFLICT", "Stale related record revision");
+          const settings = await this.prepareSettings(this.validateSettings(update.settings), record);
+          if (this.runtimes.has(record.id) && !isDeepStrictEqual(this.launchIdentity(settings), this.launchIdentity(record.settings)))
+            throw new ApiError("CONFLICT", "Related updates cannot change running process launch resources");
+          record.settings = settings; record.revision++; record.updatedAt = now();
+          related.set(record.id, record);
         }
-        if (changed) {
-          parent.settings.skills = skills; parent.revision++; parent.updatedAt = now();
-          changes.push(parent);
-        }
-        parentId = parent.parentId;
       }
+    } catch (error) { await this.rollbackMutation(changes); throw error; }
+    return { changes, related: [...related.values()], settings: context.agent.settings };
+  }
+  private async rollbackMutation(changes: MutationChange[]) {
+    for (const change of [...changes].reverse()) {
+      try { await this.mutationContext.run(true, () => change.rollback()); }
+      catch (error) { this.emit("plugin.error", errorShape(error)); }
     }
+  }
+  private async applyMutation(changes: MutationChange[]) {
+    for (const change of changes) await this.mutationContext.run(true, () => change.apply());
+  }
+  private commitSettings(agent: AgentRecord, related: AgentRecord[] = []) {
+    const changes = [agent, ...related];
     agent.updatedAt = now();
     this.store.saveAgents(changes);
     for (const record of changes) this.agents.set(record.id, record);
@@ -173,9 +202,11 @@ export class Organization implements PluginHost {
   private publishSettings(changes: AgentRecord[], createdId?: string) {
     for (const record of changes) this.emit(record.id === createdId ? "agent.created" : "agent.modified", record, record.id);
   }
-  private async finalizeSkills(change?: SkillsChange) {
-    try { await change?.committed(); }
-    catch (error) { this.emit("plugin.error", errorShape(error)); }
+  private async finalizeMutation(changes: MutationChange[]) {
+    for (const change of changes) {
+      try { await this.mutationContext.run(true, () => change.committed()); }
+      catch (error) { this.emit("plugin.error", errorShape(error)); }
+    }
   }
   registerHarness(harness: HarnessPlugin) {
     if (this.harnesses.has(harness.name))
@@ -227,11 +258,12 @@ export class Organization implements PluginHost {
     settings: Settings,
     agent: AgentRecord,
   ): Promise<Settings> {
+    settings = this.validateSettings(settings);
     for (const hook of this.settingsHooks)
-      settings = settingsSchema.parse(
-        await hook(structuredClone(settings), structuredClone(agent)),
+      settings = this.validateSettings(
+        await this.mutationContext.run(true, () => hook(structuredClone(settings), structuredClone(agent))),
       );
-    return this.uniqueCwd({ ...settings, cwd: resolve(settings.cwd ?? process.cwd()) }, agent);
+    return this.validateSettings({ ...settings, cwd: resolve(settings.cwd ?? process.cwd()) });
   }
   onEvent(handler: (event: Readonly<ServerEvent>) => void | Promise<void>) {
     this.observers.push(handler);
@@ -271,7 +303,7 @@ export class Organization implements PluginHost {
     // Hooks do not block lifecycle or transport; recursive hook emission is not re-observed.
     if (this.observerContext.getStore() || type === "plugin.error") return;
     for (const observer of this.observers) {
-      this.observerContext.run(true, () => {
+      this.mutationContext.run(false, () => this.observerContext.run(true, () => {
         try {
           Promise.resolve(observer(structuredClone(event))).catch((error) => {
             if (!this.closing) this.emit("plugin.error", errorShape(error));
@@ -279,11 +311,11 @@ export class Organization implements PluginHost {
         } catch (error) {
           this.emit("plugin.error", errorShape(error));
         }
-      });
+      }));
     }
   }
   private serialize<T>(fn: () => T | Promise<T>): Promise<T> {
-    const result = this.tail.then(fn);
+    const result = this.tail.then(() => this.mutationContext.run(true, fn));
     this.tail = result
       .catch(() => {})
       .finally(() => {
@@ -395,7 +427,22 @@ export class Organization implements PluginHost {
             undefined,
             new ApiError("INTERRUPTED", "Server restarted"),
           );
-      await this.skillsManager?.reconcile([...this.agents.values()].map(a => structuredClone(a)));
+      const migrated: AgentRecord[] = [];
+      for (const original of this.agents.values()) {
+        let settings = structuredClone(original.settings) as Record<string, unknown>;
+        for (const extension of this.extensionSettings.values())
+          if (extension.migrate) settings = extension.migrate(settings);
+        if (!isDeepStrictEqual(settings, original.settings)) {
+          const a = structuredClone(original);
+          // Representation-only migrations retain revision: external journals may fence on it.
+          a.settings = this.validateSettings(settings);
+          migrated.push(a);
+        }
+      }
+      this.store.saveAgents(migrated);
+      for (const a of migrated) this.agents.set(a.id, a);
+      for (const hook of this.initializeHooks)
+        await hook([...this.agents.values()].map(a => structuredClone(a)));
       const candidates = [...this.agents.values()].filter(
         (a) => !a.removedAt && !["stopped", "failed"].includes(a.state),
       );
@@ -459,6 +506,8 @@ export class Organization implements PluginHost {
     params: unknown = {},
     caller: Caller = { kind: "server", id: "server" },
   ): Promise<unknown> {
+    if (this.mutationContext.getStore() && /^(agent\.(create|modify|stop|restart|restart_subtree|replace_session|remove|prompt)|operation\.(wait|cancel))$/.test(method))
+      throw new ApiError("NESTED_MUTATION", "Lifecycle hooks cannot enqueue or wait for mutations");
     if (this.closing)
       throw new ApiError("SHUTTING_DOWN", "Server is shutting down");
     switch (method) {
@@ -471,7 +520,7 @@ export class Organization implements PluginHost {
                 caller.kind !== "agent" || this.isDescendant(a.id, caller.id),
             )
             .map((a) => structuredClone(a)),
-          capabilities: { skills: !!this.skillsManager },
+          capabilities: { plugins: structuredClone(this.capabilities) },
           operations: [...this.operations.values()]
             .filter((op) => {
               try {
@@ -541,16 +590,17 @@ export class Organization implements PluginHost {
             updatedAt: now(),
           };
           a.settings = await this.prepareSettings(a.settings, a);
-          const change = await this.prepareSkills(a.settings, a, caller, p.settings.skills !== undefined, true);
+          const transaction = await this.prepareMutation({ method, caller, agent: a, settingsPatch: p.settings, agents: [...this.agents.values()] });
+          a.settings = transaction.settings;
           let changes: AgentRecord[];
           try {
-            await change?.apply();
-            changes = this.commitSettings(a, caller, p.settings.skills !== undefined);
+            await this.applyMutation(transaction.changes);
+            changes = this.commitSettings(a, transaction.related);
           } catch (error) {
-            try { await change?.rollback(); } catch (rollback) { this.emit("plugin.error", errorShape(rollback)); }
+            await this.rollbackMutation(transaction.changes);
             throw error;
           }
-          await this.finalizeSkills(change);
+          await this.finalizeMutation(transaction.changes);
           this.publishSettings(changes, a.id);
           op.agentId = a.id;
           this.saveOp(op);
@@ -577,8 +627,10 @@ export class Organization implements PluginHost {
             p.expectedRevision !== a.revision
           )
             throw new ApiError("CONFLICT", "Stale agent revision");
-          const settings = await this.prepareSettings(
-            settingsSchema.parse({ ...a.settings, ...p.settings }),
+          let settings = await this.prepareSettings(
+            this.validateSettings({ ...a.settings, ...p.settings,
+              ...(p.settings?.extensions === undefined ? {} : { extensions: { ...a.settings.extensions, ...p.settings.extensions } }),
+            }),
             a,
           );
           if (!this.harnesses.has(settings.harness))
@@ -586,7 +638,8 @@ export class Organization implements PluginHost {
               "INVALID_HARNESS",
               `Unknown harness ${settings.harness}`,
             );
-          const change = await this.prepareSkills(settings, a, caller, p.settings?.skills !== undefined, false);
+          const transaction = await this.prepareMutation({ method, caller, agent: { ...a, settings }, previous: a, settingsPatch: p.settings, agents: [...this.agents.values()] });
+          settings = transaction.settings;
           const launchChanged = !isDeepStrictEqual(settings, a.settings);
           const active = this.runtimes.has(a.id);
           const harnessChanged = settings.harness !== a.settings.harness;
@@ -596,7 +649,7 @@ export class Organization implements PluginHost {
               await this.stop(this.agent(a.id));
               a.state = "stopped"; a.generation = null;
             }
-            await change?.apply();
+            await this.applyMutation(transaction.changes);
             if (p.name !== undefined) a.name = p.name;
             if (p.metadata !== undefined) a.metadata = p.metadata;
             a.settings = settings;
@@ -605,15 +658,15 @@ export class Organization implements PluginHost {
               a.sessionId = crypto.randomUUID();
               a.sessionNumber++;
             }
-            changes = this.commitSettings(a, caller, p.settings?.skills !== undefined);
+            changes = this.commitSettings(a, transaction.related);
           } catch (error) {
-            try { await change?.rollback(); } catch (rollback) { this.emit("plugin.error", errorShape(rollback)); }
+            await this.rollbackMutation(transaction.changes);
             if (launchChanged && active) {
               try { await this.start(this.agent(a.id), true); } catch {}
             }
             throw error;
           }
-          await this.finalizeSkills(change);
+          await this.finalizeMutation(transaction.changes);
           this.publishSettings(changes);
           if (launchChanged && active) await this.start(a, !harnessChanged);
           return structuredClone(a);
@@ -632,30 +685,50 @@ export class Organization implements PluginHost {
             method === "agent.remove" || method === "agent.restart_subtree"
               ? this.subtree(a)
               : [a];
-          for (const x of [...tree].reverse()) await this.stop(x);
-          if (method === "agent.remove") {
-            for (const x of tree) {
-              x.removedAt = now();
-              x.revision++;
-              this.saveAgent(x);
-              this.emit("agent.removed", { removedAt: x.removedAt }, x.id);
+          const transactions: Awaited<ReturnType<Organization["prepareMutation"]>>[] = [];
+          try {
+            for (const x of tree) transactions.push(await this.prepareMutation({ method, caller, agent: x, previous: x, agents: [...this.agents.values()] }));
+            for (const x of [...tree].reverse()) await this.stop(x);
+            for (const transaction of transactions) await this.applyMutation(transaction.changes);
+            const records = tree.map((x, i) => {
+              const record = { ...structuredClone(x), settings: transactions[i]!.settings };
+              if (!isDeepStrictEqual(record.settings, x.settings)) record.revision++;
+              return record;
+            });
+            if (method === "agent.remove") for (const x of records) { x.removedAt = now(); x.revision++; }
+            if (method === "agent.replace_session") {
+              records[0]!.sessionId = crypto.randomUUID(); records[0]!.sessionNumber++; records[0]!.revision++;
             }
+            const all = [...records, ...transactions.flatMap(t => t.related)];
+            if (new Set(all.map(x => x.id)).size !== all.length) throw new ApiError("CONFLICT", "Duplicate transaction target");
+            this.store.saveAgents(all);
+            for (const x of all) this.agents.set(x.id, x);
+          } catch (error) {
+            for (const transaction of [...transactions].reverse()) await this.rollbackMutation(transaction.changes);
+            throw error;
+          }
+          for (const transaction of transactions) await this.finalizeMutation(transaction.changes);
+          this.publishSettings(transactions.flatMap(t => t.related));
+          for (const x of tree) {
+            const record = this.agents.get(x.id)!;
+            if (method !== "agent.remove" && !isDeepStrictEqual(record.settings, x.settings))
+              this.emit("agent.modified", record, record.id);
+          }
+          const current = this.agent(p.agentId, false);
+          if (method === "agent.remove") {
+            for (const x of tree) this.emit("agent.removed", { removedAt: this.agents.get(x.id)!.removedAt }, x.id);
           } else if (method !== "agent.stop") {
             if (method === "agent.replace_session") {
-              a.sessionId = crypto.randomUUID();
-              a.sessionNumber++;
-              a.revision++;
-              this.saveAgent(a);
               this.emit(
                 "agent.session_replaced",
-                { sessionNumber: a.sessionNumber },
+                { sessionNumber: current.sessionNumber },
                 a.id,
               );
             }
             const errors: string[] = [];
             for (const x of tree) {
               try {
-                await this.start(x, method !== "agent.replace_session");
+                await this.start(this.agent(x.id), method !== "agent.replace_session");
               } catch (error) {
                 errors.push(`${x.id}: ${errorShape(error).message}`);
               }
@@ -663,7 +736,7 @@ export class Organization implements PluginHost {
             if (errors.length)
               throw new ApiError("START_FAILED", errors.join("; "));
           }
-          return structuredClone(a);
+          return structuredClone(current);
         });
       }
       case "agent.prompt": {
@@ -884,13 +957,13 @@ export class Organization implements PluginHost {
       dataDir: this.dataDir,
       token,
       mcpServers: this.mcpServers(token),
+      env: {},
     };
     let rt: Runtime | undefined;
     try {
-      if (!this.skillsManager && Object.values(a.settings.skills ?? {}).some(s => s !== "unavailable"))
-        throw new ApiError("SKILLS_DISABLED", "Enable the skills plugin before launching this agent");
-      await this.uniqueCwd(a.settings, a);
-      context.skillPaths = await this.skillsManager?.launchPaths(structuredClone(a)) ?? [];
+      this.validateSettings(a.settings);
+      for (const hook of this.contextHooks)
+        await deadline(Promise.resolve(hook(context)), this.limits.startTimeoutMs, "Launch preparation timed out");
       let spec = await deadline(
         Promise.resolve(harness.launch(context)),
         this.limits.startTimeoutMs,
@@ -902,16 +975,14 @@ export class Organization implements PluginHost {
           this.limits.startTimeoutMs,
           "Launch hook timed out",
         );
-      if (this.skillsManager) {
-        const checked = await this.uniqueCwd({ ...a.settings, cwd: spec.cwd ?? a.settings.cwd }, a);
-        if (checked.cwd !== await realpath(a.settings.cwd ?? process.cwd()))
-          throw new ApiError("CWD_CONFLICT", "Harness cwd must match the managed workspace");
-      }
       spec = {
         ...spec,
         cwd: spec.cwd ?? a.settings.cwd ?? process.cwd(),
-        env: { ...process.env, ...a.settings.env, ...spec.env },
+        env: { ...process.env, ...a.settings.env, ...spec.env, ...context.env,
+          ORG_SOCKET: this.socketPath, ORG_TOKEN: token, ORG_AGENT_ID: a.id },
       };
+      for (const hook of this.launchValidators)
+        await deadline(Promise.resolve(hook(spec, context)), this.limits.startTimeoutMs, "Launch validation timed out");
       const proc = new AgentProcess(
         spec,
         this.limits,

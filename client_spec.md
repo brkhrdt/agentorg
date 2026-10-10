@@ -6,7 +6,7 @@ This document specifies the **currently implemented** public client API for the 
 
 The client talks to the organization server, **not directly to Pi, ACP, or MCP**. ACP is the server-to-harness protocol; MCP is the agent-to-organization tool interface. Some public events carry ACP `SessionUpdate` payloads, described below.
 
-There is currently no protocol-version handshake, standalone capability-discovery endpoint, model-list endpoint, or harness-list endpoint. Current snapshots include optional `capabilities.skills`; older servers omit it. Configure the socket path and available harness/model choices through deployment configuration. There are no built-in harnesses. The separate `@agentorg/plugin-pi-agent` registers `pi` when explicitly loaded; other names depend on loaded plugins. Missing harness plugins fail creation with `INVALID_HARNESS` and restart operations with `START_FAILED` (unknown harness), without deleting records/sessions. Plugin API version `1` is not a client wire-protocol version.
+There is currently no protocol-version handshake, standalone capability-discovery endpoint, model-list endpoint, or harness-list endpoint. Current snapshots include optional `capabilities.plugins`, an uninterpreted namespaced discovery map; older servers omit it. Configure the socket path and available harness/model choices through deployment configuration. There are no built-in harnesses. The separate `@agentorg/plugin-pi-agent` registers `pi` when explicitly loaded; other names depend on loaded plugins. Missing harness plugins fail creation with `INVALID_HARNESS` and restart operations with `START_FAILED` (unknown harness), without deleting records/sessions. Plugin API version `1` is not a client wire-protocol version.
 
 Source references:
 
@@ -156,7 +156,7 @@ interface AgentSettings {
   cwd?: string;
   env?: Record<string, string>;
   options: Record<string, unknown>; // Defaults to {} on creation.
-  skills?: Record<string, 'unavailable' | 'available' | 'installed'>; // Optional skills plugin selection.
+  extensions?: Record<string, unknown>; // Plugin-owned namespaced settings.
 }
 ```
 
@@ -314,7 +314,7 @@ interface OrganizationSnapshot {
   seq: number;
   agents: AgentRecord[];
   operations: Operation[];
-  capabilities?: { skills: boolean };
+  capabilities?: { plugins?: Record<string, unknown> };
 }
 ```
 
@@ -346,7 +346,7 @@ interface CreateAgentParams {
     cwd?: string;
     env?: Record<string, string>;
     options?: Record<string, unknown>;
-    skills?: Record<string, 'unavailable' | 'available' | 'installed'>;
+    extensions?: Record<string, unknown>;
   };
 }
 ```
@@ -386,8 +386,8 @@ Patch behavior:
 - Omitted top-level fields preserve existing values. Omitting `settings` entirely preserves all settings.
 - `metadata` replaces the entire metadata object.
 - `settings` shallow-merges with existing settings. Within it, `env` and `options` replace their entire corresponding objects; they do not deep-merge.
-- Omitted settings keys, including `options` and `skills`, preserve their existing values. Older server builds cleared omitted `options` during patches; upgrade before using skill-only patches.
-- Changing `cwd`, `env`, model/provider, harness, options, or the target skill selection counts as a launch-settings change.
+- Omitted settings keys, including `options`, preserve their existing values. Within `extensions`, omitted namespaces are preserved; each supplied namespace value is a complete replacement, validated by its owning plugin. `{extensions: {}}` changes no namespace.
+- Changing `cwd`, `env`, model/provider, harness, options, or plugin settings counts as a launch-settings change.
 - Launch-settings changes stop and restart a currently active agent, cancelling its prompt work; descendants are unaffected.
 - Name/metadata-only changes do not restart its process.
 - Modifying a stopped/failed agent does not start it. Follow with an explicit restart when ready.
@@ -869,7 +869,7 @@ Public clients act as operators over the whole organization. MCP callers act as 
 
 The public client normally sees descendant management as ordinary `agent.*` operations whose `caller.kind` is `agent`. It need not implement MCP to observe or manage that work. Calling `mcp.list` or `mcp.call` as an ordinary public client returns `FORBIDDEN`.
 
-Plugins can add namespaced client endpoints and additional event types. Snapshot `capabilities.skills` advertises the skills plugin; there is no generic endpoint discovery mechanism. Other plugin schemas must be configured/documented separately. Unknown custom data should be preserved or displayed as generic JSON, not treated as a malformed core record.
+Plugins can add namespaced client endpoints and additional event types. Snapshot `capabilities.plugins` contains plugin-provided discovery descriptors (for example endpoints and settingsNamespace); core does not interpret their shape. Absence means optional plugin features are unavailable. Preserve unknown plugin settings/capabilities/events as generic JSON; do not issue unsupported plugin requests.
 
 Hierarchy checks are API policies, not a filesystem/process sandbox. All public clients share the server OS user's authority; agents with shell access also run with that user's privileges unless a trusted plugin adds isolation. Client logs must not leak settings, prompts, tool arguments/results, or transcript content unintentionally.
 
@@ -945,27 +945,25 @@ Cancellation/removal acceptance does not mean completion; query their operations
 - [ ] Unknown plugin events/error codes tolerated without weakening built-in validation.
 - [ ] Sensitive data excluded/redacted from client diagnostics as appropriate.
 
-## 14. Optional skills plugin
+## 14. Optional plugin features
 
-Discover support from `organization.snapshot.capabilities?.skills === true`; absence means unsupported. Keep persisted `settings.skills` visible in raw agent data even when support is disabled. Do not call skills endpoints on older/disabled servers.
+Discover optional features using `organization.snapshot.capabilities?.plugins`, a
+map from plugin namespace to plugin-owned descriptors. Clients must validate the
+descriptor expected by a particular UI before invoking its advertised endpoints.
+Older servers may omit the map. Do not infer support from retained settings alone.
 
-Client-only endpoints:
+Agent selections/configuration remain visible under `settings.extensions` even
+when a plugin is disabled. Built-in keys are strictly validated; plugins validate
+their namespace. Mutations use normal lifecycle operations and expected revisions.
+Related plugin-requested record updates commit atomically with the target, and each
+related changed record receives an incremented revision and modified event.
+Finalization/launch errors after commit do not revert persisted settings.
 
-| Method | Parameters | Result |
-|---|---|---|
-| `skills.add` | `{name: string, gitUrl: string}` | `{name, gitUrl, description, createdAt, path}` |
-| `skills.list` | `{}` | `{skills: Skill[], recovery: {agentId, skill, path, error?}[]}` |
-
-Catalog names and source URLs are unique; duplicates fail with `DUPLICATE`, never update an existing entry. Names are lowercase alphanumeric words separated by single hyphens, ≤64 characters. Production Git URLs are HTTPS on github.com/gitlab.com/bitbucket.org, without credentials, ports, queries, fragments or redirects. One root `SKILL.md`, matching name and nonempty description/instructions, is required. The default branch is cloned; no delete/update/pin API exists. `skills.add` can take up to the Git timeout (60 seconds); use a longer request timeout, and never automatically retry an unknown outcome. All paths refer to the server filesystem.
-
-`settings.skills` maps catalog names to `unavailable`, `available`, or `installed`. Missing entries mean unavailable. New agents default to no selection; children inherit nothing automatically. An explicit map is a complete replacement, `{}` clears it, and omission during modification is unchanged. Every reference must exist, including explicit unavailable entries. Use `expectedRevision` when saving drafts. Installed skills load into the agent; available skills are only delegable.
-
-Public-client installed/available grants add availability to all ancestors, preserving their installed states. Target and ancestor records persist atomically; changed ancestor revisions increment and `agent.modified` events follow. Grant revocation is not automatic: ancestors and existing descendants retain earlier selections. MCP `child_create`/`descendant_modify` accept the same `settings.skills` field but can grant only the caller's available/installed skills; unchanged omitted selections are not fresh grants. `skills_list` is agent-facing MCP, not a public endpoint.
-
-Mutations still return lifecycle operations and may restart active targets. Installation/validation failure does not commit selections or ancestor grants. Later launch failure leaves committed selections with a failed agent. With support disabled, new nonempty selections and launches using retained nonempty selections fail with `SKILLS_DISABLED`. Existing settings/files survive plugin disablement.
-
-All nonremoved agents must have distinct canonical cwd paths while enabled (including stopped/failed agents). `CWD_CONFLICT`, `COLLISION`, `SKILL_NOT_READY`, `FORBIDDEN`, `LIMIT`, and validation errors require inspection, not automatic retry. The cwd plugin optionally adds containment rules.
-
-Files install under `<cwd>/.agents/skills/<name>`. Downgrade/cwd changes retain old checkouts outside discovery; removal retains them in place. The plugin fetches committed work into fresh central recovery refs without committing, merging, resetting or deleting dirty/untracked work. Recovery is asynchronous on removal and is not implied by removal success. Watch `skills.error`, `skills.recovered`, `skills.catalog_added` and `plugin.error`; pending failures are returned by `skills.list`. Settings describe selections, not an unconditional guarantee of filesystem readiness. Missing/damaged managed checkouts cause launch failures and operator-visible diagnostics. Core SQLite writes and filesystem/Git work do not share a transaction; a separate durable journal supports conservative startup reconciliation.
+Unknown persisted legacy fields and unregistered extension namespaces fail closed
+on modification/launch with `EXTENSION_REQUIRED`, but remain visible and intact.
+Owner-provided representation migrations run atomically during initialization;
+they retain revisions so external recovery journals remain valid. Ambiguity aborts
+startup, never silently drops data. Stop/remove remain available with plugins
+absent. See [generic plugin host APIs and operational limits](EXTENSIONS.md).
 
 Client conformance tests should cover events arriving before acceptance responses, out-of-order responses, late queued responses after terminal events, reconnect during running work, filtered sequence gaps, stopped/failed root reuse, revision conflicts, supersession, cancellation escalation, expired history/permissions, and response truncation. Deterministic protocol tests need no model calls; any model-backed testing for this project must use only `gpt-6-luna`.

@@ -7,6 +7,8 @@ export interface LaunchSpec {
   args: string[];
   cwd?: string;
   env?: Record<string, string | undefined>;
+  /** Environment contracts consumed by this harness/wrapper, for plugin readiness validation. */
+  consumesEnv?: string[];
   /** Optional container/wrapper-specific graceful shutdown, bounded by stopTimeoutMs. */
   gracefulStop?: (pid: number) => void | Promise<void>;
 }
@@ -17,8 +19,8 @@ export interface LaunchContext {
   token: string;
   /** Host-owned MCP launch specs, including full argv/env; adapters must not infer core worker paths. */
   mcpServers: McpServer[];
-  /** Explicit files supplied by the enabled skills manager; never ambient discovery. */
-  skillPaths?: string[];
+  /** Plugin-provided launch environment; merged after harness environment. */
+  env: Record<string, string | undefined>;
 }
 export interface HarnessPlugin {
   name: string;
@@ -40,7 +42,11 @@ export interface ToolDefinition {
     api: PluginHost,
   ): unknown | Promise<unknown>;
 }
-export interface SkillsChange {
+export interface MutationChange {
+  /** Optional complete target settings replacement. */
+  settings?: Settings;
+  /** Atomic related settings replacements; plugins own authorization. */
+  updates?: Array<{ agentId: string; expectedRevision: number; settings: Settings }>;
   /** Called after the old process stops, before records commit. */
   apply(): Promise<void>;
   /** Compensate on pre-commit failure, retaining uncertain/user artifacts. */
@@ -48,19 +54,32 @@ export interface SkillsChange {
   /** Records committed; journal finalization failure cannot undo the commit. */
   committed(): Promise<void>;
 }
-export interface SkillsManager {
-  prepare(settings: Settings, agent: Readonly<AgentRecord>, context: {
-    caller: Caller; selectionSupplied: boolean; creating: boolean;
-  }): Promise<SkillsChange>;
-  launchPaths(agent: Readonly<AgentRecord>): Promise<string[]>;
-  reconcile(agents: Readonly<AgentRecord>[]): Promise<void>;
+export interface MutationContext {
+  method: string;
+  caller: Caller;
+  agent: Readonly<AgentRecord>;
+  previous?: Readonly<AgentRecord>;
+  settingsPatch?: Partial<Settings>;
+  agents: Readonly<AgentRecord>[];
+}
+export interface ExtensionSettings {
+  namespace: string;
+  validate(value: unknown): unknown;
+  /** Identity of launch resources; defaults to the whole value. */
+  launchKey?(value: unknown): unknown;
+  /** Runs only over persisted records, before startup reconciliation. */
+  migrate?(settings: Record<string, unknown>): Record<string, unknown>;
 }
 
 /** API v1 is additive. Breaking changes require a new apiVersion. Plugins are trusted. */
 export interface PluginHost {
   readonly dataDir: string;
-  /** One skills manager; core owns serialized mutations and atomic ancestor grants. */
-  registerSkills(manager: SkillsManager): void;
+  registerSettings(extension: ExtensionSettings): void;
+  registerCapability(namespace: string, value: unknown): void;
+  beforeMutation(handler: (context: MutationContext) => MutationChange | void | Promise<MutationChange | void>): void;
+  onInitialize(handler: (agents: Readonly<AgentRecord>[]) => void | Promise<void>): void;
+  prepareLaunch(handler: (context: LaunchContext) => void | Promise<void>): void;
+  validateLaunch(handler: (spec: LaunchSpec, context: LaunchContext) => void | Promise<void>): void;
   registerHarness(harness: HarnessPlugin): void;
   registerEndpoint(
     name: string,
