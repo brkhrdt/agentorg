@@ -6,7 +6,7 @@ This document specifies the **currently implemented** public client API for the 
 
 The client talks to the organization server, **not directly to Pi, ACP, or MCP**. ACP is the server-to-harness protocol; MCP is the agent-to-organization tool interface. Some public events carry ACP `SessionUpdate` payloads, described below.
 
-There is currently no protocol-version handshake, standalone capability-discovery endpoint, model-list endpoint, or harness-list endpoint. Current snapshots include optional `capabilities.plugins`, an uninterpreted namespaced discovery map; older servers omit it. Configure the socket path and available harness/model choices through deployment configuration. There are no built-in harnesses. The separate `@agentorg/plugin-pi-agent` registers `pi` when explicitly loaded; other names depend on loaded plugins. Missing harness plugins fail creation with `INVALID_HARNESS` and restart operations with `START_FAILED` (unknown harness), without deleting records/sessions. Plugin API version `1` is not a client wire-protocol version.
+There is currently no protocol-version handshake, standalone capability-discovery endpoint, or model-list endpoint. `organization.snapshot` reports enabled harness names in `capabilities.harnesses` and includes optional `capabilities.plugins`, an uninterpreted namespaced discovery map; older servers may omit these fields. Harness names reflect plugins loaded by the server. There are no built-in harnesses. The separate `@agentorg/plugin-pi-agent` registers `pi` when explicitly loaded; other names depend on loaded plugins. Missing harness plugins fail creation with `INVALID_HARNESS` and restart operations with `START_FAILED` (unknown harness), without deleting records/sessions. Plugin API version `1` is not a client wire-protocol version.
 
 Source references:
 
@@ -314,7 +314,10 @@ interface OrganizationSnapshot {
   seq: number;
   agents: AgentRecord[];
   operations: Operation[];
-  capabilities?: { plugins?: Record<string, unknown> };
+  capabilities?: {
+    harnesses?: string[];
+    plugins?: Record<string, unknown>;
+  };
 }
 ```
 

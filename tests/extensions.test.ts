@@ -20,6 +20,7 @@ test("generic participant atomic related updates, compensation, finalize and nes
   const calls: string[] = [];
   try {
     org.registerHarness({ name: "fixture", launch: () => ({ command: process.execPath, args: [join(import.meta.dir, "fixtures/agent.ts")] }) });
+    expect((await org.request("organization.snapshot") as any).capabilities.harnesses).toEqual(["fixture"]);
     org.registerSettings({ namespace: "demo", validate: value => value, launchKey: () => "none" });
     org.registerSettings({ namespace: "other", validate: value => value });
     org.registerCapability("demo", { settingsNamespace: "demo" });
@@ -72,7 +73,9 @@ test("zero harness/feature plugins initialize successfully", async () => {
   const org = new Organization(join(dir, "server.sock"), dir);
   try {
     await org.initialize();
-    expect((await org.request("organization.snapshot") as any).capabilities.plugins).toEqual({});
+    const snapshot = await org.request("organization.snapshot") as any;
+    expect(snapshot.capabilities.harnesses).toEqual([]);
+    expect(snapshot.capabilities.plugins).toEqual({});
     const accepted = await org.request("agent.create", { settings }) as Operation;
     const op = await org.request("operation.wait", { operationId: accepted.id, waitMs: 1000 }) as Operation;
     expect(op.error?.code).toBe("INVALID_HARNESS");

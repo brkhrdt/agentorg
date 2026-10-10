@@ -525,7 +525,10 @@ export class Organization implements PluginHost {
                 caller.kind !== "agent" || this.isDescendant(a.id, caller.id),
             )
             .map((a) => structuredClone(a)),
-          capabilities: { plugins: structuredClone(this.capabilities) },
+          capabilities: {
+            harnesses: [...this.harnesses.keys()].sort(),
+            plugins: structuredClone(this.capabilities),
+          },
           operations: [...this.operations.values()]
             .filter((op) => {
               try {
