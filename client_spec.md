@@ -6,7 +6,7 @@ This document specifies the **currently implemented** public client API for the 
 
 The client talks to the organization server, **not directly to Pi, ACP, or MCP**. ACP is the server-to-harness protocol; MCP is the agent-to-organization tool interface. Some public events carry ACP `SessionUpdate` payloads, described below.
 
-There is currently no protocol-version handshake, standalone capability-discovery endpoint, or model-list endpoint. `organization.snapshot` reports enabled harness names in `capabilities.harnesses` and includes optional `capabilities.plugins`, an uninterpreted namespaced discovery map; older servers may omit these fields. Harness names reflect plugins loaded by the server. There are no built-in harnesses. The separate `@agentorg/plugin-pi-agent` registers `pi` when explicitly loaded; other names depend on loaded plugins. Missing harness plugins fail creation with `INVALID_HARNESS` and restart operations with `START_FAILED` (unknown harness), without deleting records/sessions. Plugin API version `1` is not a client wire-protocol version.
+There is currently no protocol-version handshake or standalone capability-discovery endpoint. `organization.snapshot` reports enabled harness names in `capabilities.harnesses`, harnesses supporting provider/model discovery in `capabilities.modelDiscovery`, and optional `capabilities.plugins`, an uninterpreted namespaced discovery map; older servers may omit these fields. Use `organization.providers` for a selected harness, then `organization.models` for a selected provider. Harness names and catalogs reflect plugins loaded by the server. There are no built-in harnesses. The separate `@agentorg/plugin-pi-agent` registers `pi` when explicitly loaded; other names depend on loaded plugins. Missing harness plugins fail creation with `INVALID_HARNESS` and restart operations with `START_FAILED` (unknown harness), without deleting records/sessions. Plugin API version `1` is not a client wire-protocol version.
 
 Source references:
 
@@ -316,6 +316,7 @@ interface OrganizationSnapshot {
   operations: Operation[];
   capabilities?: {
     harnesses?: string[];
+    modelDiscovery?: string[]; // Harnesses supporting provider/model catalog queries.
     plugins?: Record<string, unknown>;
   };
 }
@@ -326,6 +327,31 @@ Includes active **and removed** agent records and all retained operations, inclu
 This is a synchronous snapshot of the server's current in-memory view and sequence. It can represent an intermediate stage of a lifecycle operation; it is not a promise that all mutations have settled. It does not include a live permission-request list or a transcript.
 
 There are no snapshot pagination/filter parameters for public clients. Large organizations may need deployment buffer-limit changes before the snapshot fits.
+
+### Provider/model discovery: `organization.providers`, `organization.models`
+
+Read-only queries; they do not create agents or lifecycle operations.
+
+```ts
+// organization.providers
+{ harness: string, cwd?: string, env?: Record<string, string>, options?: Record<string, unknown> }
+// Result: { providers: string[] }
+
+// organization.models (select a provider first)
+{ harness: string, provider: string, cwd?: string, env?: Record<string, string>, options?: Record<string, unknown> }
+// Result: { models: Array<{ provider: string, id: string, name?: string }> }
+```
+
+Providers and models are sorted and deduplicated. Send the draft launch context
+when it affects harness credentials/configuration. Only model identifiers and
+optional display names are returned, never credentials. Catalog availability is
+harness-defined and does not guarantee a later launch succeeds. Unknown providers
+return an empty model list. Unknown harnesses return `INVALID_HARNESS`; harnesses
+without discovery return `UNSUPPORTED`. Discovery is bounded by the server's
+startup timeout; plugin failures are attributed to the owning plugin.
+Clients should retain manual entry for older servers or unsupported harnesses.
+Models may be omitted to use harness defaults; discovery does not validate or
+restrict `agent.create`/`agent.modify` settings.
 
 ### 5.2 `agent.get`
 

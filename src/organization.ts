@@ -527,6 +527,7 @@ export class Organization implements PluginHost {
             .map((a) => structuredClone(a)),
           capabilities: {
             harnesses: [...this.harnesses.keys()].sort(),
+            modelDiscovery: [...this.harnesses.values()].filter(h => h.listModels).map(h => h.name).sort(),
             plugins: structuredClone(this.capabilities),
           },
           operations: [...this.operations.values()]
@@ -540,6 +541,30 @@ export class Organization implements PluginHost {
             })
             .map((op) => structuredClone(op)),
         };
+      case "organization.providers":
+      case "organization.models": {
+        const p = z.object({
+          harness: z.string().min(1),
+          provider: method === "organization.models" ? z.string().min(1) : z.string().optional(),
+          cwd: z.string().min(1).optional(),
+          env: z.record(z.string(), z.string()).optional(),
+          options: z.record(z.string(), z.unknown()).optional(),
+        }).strict().parse(params);
+        const harness = this.harnesses.get(p.harness);
+        if (!harness) throw new ApiError("INVALID_HARNESS", `Unknown harness ${p.harness}`);
+        if (!harness.listModels) throw new ApiError("UNSUPPORTED", `Harness ${p.harness} does not support model discovery`);
+        const catalog = z.array(z.object({
+          provider: z.string().min(1), id: z.string().min(1), name: z.string().optional(),
+        })).parse(await deadline(
+          Promise.resolve(harness.listModels({ cwd: p.cwd && resolve(p.cwd), env: p.env, options: p.options })),
+          this.limits.startTimeoutMs,
+          pluginTimeout(harness.listModels, "Model discovery timed out"),
+        ));
+        if (method === "organization.providers")
+          return { providers: [...new Set(catalog.map(m => m.provider))].sort() };
+        const models = new Map(catalog.filter(m => m.provider === p.provider).map(m => [m.id, m]));
+        return { models: [...models.values()].sort((a, b) => a.id.localeCompare(b.id)) };
+      }
       case "agent.get": {
         const { agentId } = target.parse(params);
         this.authorize(caller, agentId);

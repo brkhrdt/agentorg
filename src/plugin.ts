@@ -22,8 +22,20 @@ export interface LaunchContext {
   /** Plugin-provided launch environment; merged after harness environment. */
   env: Record<string, string | undefined>;
 }
+export interface ModelDiscoveryContext {
+  cwd?: string;
+  env?: Record<string, string>;
+  options?: Record<string, unknown>;
+}
+export interface HarnessModel {
+  provider: string;
+  id: string;
+  name?: string;
+}
 export interface HarnessPlugin {
   name: string;
+  /** Available models using server-side credentials/configuration; never return secrets. */
+  listModels?(context: ModelDiscoveryContext): HarnessModel[] | Promise<HarnessModel[]>;
   /** Launch a stdio ACP v1 agent; non-ACP harnesses must supply an adapter. */
   launch(context: LaunchContext): LaunchSpec | Promise<LaunchSpec>;
 }

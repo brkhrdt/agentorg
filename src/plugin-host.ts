@@ -77,7 +77,11 @@ export function pluginHost(host: PluginHost, name: string): PluginHost {
     prepareLaunch: handler => host.prepareLaunch(wrap(handler)),
     validateLaunch: handler => host.validateLaunch(wrap(handler)),
     registerHarness(harness) {
-      host.registerHarness({ ...harness, launch: wrap(harness.launch.bind(harness), launchSpec) });
+      host.registerHarness({
+        ...harness,
+        launch: wrap(harness.launch.bind(harness), launchSpec),
+        ...(harness.listModels && { listModels: wrap(harness.listModels.bind(harness)) }),
+      });
     },
     registerEndpoint: (endpoint, handler) => host.registerEndpoint(endpoint, wrap(handler)),
     registerTool: definition => host.registerTool(tool(definition)),
