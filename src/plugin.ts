@@ -78,8 +78,18 @@ export interface MutationContext {
   settingsPatch?: Partial<Settings>;
   agents: Readonly<AgentRecord>[];
 }
+/** Additive presentation hints; validation/authorization remain plugin-owned. */
+export interface SettingsEditorField {
+  /** A top-level key inside settings.extensions[namespace]. */
+  key: string;
+  label?: string;
+  editor: "text" | "number" | "boolean" | "string-map" | "object-map" | "list" | "directory" | "path" | "directories" | "paths";
+  sensitive?: boolean;
+}
 export interface ExtensionSettings {
   namespace: string;
+  /** Advertised in snapshot.capabilities.settingsEditors, independent of plugin endpoints. */
+  ui?: { fields: SettingsEditorField[] };
   validate(value: unknown): unknown;
   /** Identity of launch resources; defaults to the whole value. */
   launchKey?(value: unknown): unknown;

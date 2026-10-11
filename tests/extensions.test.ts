@@ -6,6 +6,23 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const settings = { harness: "fixture", model: "test", options: {} };
+test("plugin settings editor discovery is additive, validated and detached from plugin and client objects", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "extension-editors-"));
+  const org = new Organization(join(dir, "server.sock"), dir);
+  try {
+    const ui = { fields: [{ key: "files", editor: "paths" as const, label: "Input files" }, { key: "env", editor: "string-map" as const, sensitive: true }] };
+    org.registerSettings({ namespace: "demo", validate: value => value, ui });
+    org.registerSettings({ namespace: "opaque", validate: value => value });
+    ui.fields[0]!.label = "mutated";
+    const snapshot = await org.request("organization.snapshot") as any;
+    expect(snapshot.capabilities.settingsEditors).toEqual({ demo: { fields: [{ key: "files", editor: "paths", label: "Input files" }, { key: "env", editor: "string-map", sensitive: true }] } });
+    snapshot.capabilities.settingsEditors.demo.fields[0].editor = "text";
+    expect((await org.request("organization.snapshot") as any).capabilities.settingsEditors.demo.fields[0].editor).toBe("paths");
+    expect(() => org.registerSettings({ namespace: "bad", validate: value => value, ui: { fields: [{ key: "x", editor: "unknown" as any }] } })).toThrow();
+    expect(() => org.registerSettings({ namespace: "duplicate", validate: value => value, ui: { fields: [{ key: "x", editor: "text" }, { key: "x", editor: "list" }] } })).toThrow("Duplicate editor field");
+  } finally { await org.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("strict built-ins and generic extension patches", () => {
   const original = settingsSchema.parse({ ...settings, options: { mode: "high" }, extensions: { demo: { value: 1 } } });
   const patch = settingsPatchSchema.parse({ model: "other" });

@@ -16,6 +16,51 @@ Plugins may register a conservative legacy-settings migration. Initialization
 migrates all affected rows atomically, retaining revisions (representation only), before
 reconciliation and recovery. Ambiguous migrations abort startup without writes.
 
+## Reusable client settings editors
+
+Plugins may add optional presentation hints to `registerSettings`:
+
+```ts
+host.registerSettings({
+  namespace: "demo",
+  validate: validateDemoSettings,
+  ui: { fields: [
+    { key: "inputs", label: "Input files", editor: "paths" },
+    { key: "grants", editor: "directories" },
+    { key: "tags", editor: "list" },
+    { key: "env", editor: "string-map", sensitive: true },
+    { key: "retries", editor: "number" },
+    { key: "enabled", editor: "boolean" },
+  ] },
+});
+```
+
+The snapshot advertises these as `capabilities.settingsEditors[namespace].fields`.
+Each field addresses one **top-level** namespace object key (not a dotted path).
+Keys match `[A-Za-z_][A-Za-z0-9_.-]*`; keys/labels and field counts are capped at
+128, and duplicate keys are rejected at registration. Plugins with scalar/array
+namespace values should omit these hints and retain opaque editing.
+
+Editors are `text`, `number`, `boolean`, `string-map`, `object-map`, `list`
+(nonempty strings), `directory`/`path` (single path), and `directories`/`paths`
+(path lists). Path completion always uses `organization.paths` on the **server**,
+with the same captured parent/server startup base as cwd. Directory grants must
+already exist; editors do not create them. `path`/`paths` allow file suggestions;
+the plugin must validate existence and its own semantics. `sensitive` hides values
+outside explicit entry/raw editing and filters maps by key only.
+
+These are hints, not a validation schema or authorization policy. Validators and
+lifecycle operations remain authoritative. Clients may ignore unknown editor
+kinds. Older clients/servers work unchanged. AgentOrg TUI stages edits against the
+captured revision, preserves unedited sibling fields, and sends complete changed
+namespace replacement values. Absent fields are not added until explicitly edited;
+no defaults or runtime plugin code are loaded by the client. Avoid editing the same
+namespace through both its advertised form and raw extensions in one draft (the
+client rejects ambiguous changes). Podman's specialized image propagation remains
+an explicit client-only operation, not a generic UI hook.
+
+## Lifecycle participants
+
 Lifecycle participants prepare inside the server's serialized queue, before an
 old process stops. They receive cloned current records and the proposed target,
 plus the original settings patch. They can transform target settings and request

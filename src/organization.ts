@@ -139,7 +139,15 @@ export class Organization implements PluginHost {
   registerSettings(extension: ExtensionSettings) {
     if (!/^[a-z][a-z0-9.-]*$/.test(extension.namespace) || this.extensionSettings.has(extension.namespace))
       throw new Error(`Invalid/duplicate settings namespace ${extension.namespace}`);
-    this.extensionSettings.set(extension.namespace, extension);
+    const ui = extension.ui === undefined ? undefined : z.object({ fields: z.array(z.object({
+      key: z.string().regex(/^[A-Za-z_][A-Za-z0-9_.-]*$/).max(128),
+      label: z.string().min(1).max(128).optional(),
+      editor: z.enum(["text", "number", "boolean", "string-map", "object-map", "list", "directory", "path", "directories", "paths"]),
+      sensitive: z.boolean().optional(),
+    }).strict()).max(128) }).strict().parse(extension.ui);
+    if (ui && new Set(ui.fields.map(field => field.key)).size !== ui.fields.length)
+      throw new Error(`Duplicate editor field in ${extension.namespace}`);
+    this.extensionSettings.set(extension.namespace, { ...extension, ...(ui && { ui: structuredClone(ui) }) });
   }
   registerCapability(namespace: string, value: unknown) {
     if (Object.hasOwn(this.capabilities, namespace)) throw new Error(`Duplicate capability ${namespace}`);
@@ -535,6 +543,7 @@ export class Organization implements PluginHost {
             harnesses: [...this.harnesses.keys()].sort(),
             modelDiscovery: [...this.harnesses.values()].filter(h => h.listModels).map(h => h.name).sort(),
             plugins: structuredClone(this.capabilities),
+            settingsEditors: Object.fromEntries([...this.extensionSettings].filter(([, extension]) => extension.ui).map(([namespace, extension]) => [namespace, structuredClone(extension.ui)])),
           },
           operations: [...this.operations.values()]
             .filter((op) => {
