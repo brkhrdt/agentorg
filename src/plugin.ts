@@ -7,6 +7,8 @@ export interface LaunchSpec {
   args: string[];
   cwd?: string;
   env?: Record<string, string | undefined>;
+  /** Default true. Wrappers can opt out of host/agent environment merging. */
+  inheritEnv?: boolean;
   /** Environment contracts consumed by this harness/wrapper, for plugin readiness validation. */
   consumesEnv?: string[];
   /** Optional container/wrapper-specific graceful shutdown, bounded by stopTimeoutMs. */
@@ -17,6 +19,8 @@ export interface LaunchContext {
   socketPath: string;
   dataDir: string;
   token: string;
+  /** Set by a container plugin before harness launch; commands must exist in the image. */
+  executionEnvironment?: "container";
   /** Host-owned MCP launch specs, including full argv/env; adapters must not infer core worker paths. */
   mcpServers: McpServer[];
   /** Plugin-provided launch environment; merged after harness environment. */

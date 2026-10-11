@@ -37,7 +37,7 @@ changes belongs to the plugin, not to the end-user caller.
 `beforeLaunch` transforms the spec; `validateLaunch` checks the final resolved
 spec after all transformations. `LaunchSpec.consumesEnv` declares environment
 contracts a harness/wrapper consumes; plugins can require these for readiness.
-Host capability env variables are applied last. Process limits, credentials, bounded startup and
+Host capability env variables are applied last. `LaunchSpec.inheritEnv: false` omits ambient host environment and `settings.env` from the final merge (only explicit spec env, trusted context env, and core capability variables remain). Container plugins set `LaunchContext.executionEnvironment: "container"` before harness launch; adapters then return image-installed commands rather than host paths. Process limits, credentials, bounded startup and
 safe shutdown remain host-owned. Workspace policy plugins validate final cwd.
 `capabilities.plugins` is an uninterpreted namespaced discovery map; absent maps
 on older servers mean optional plugin features are unavailable.

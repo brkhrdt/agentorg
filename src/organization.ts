@@ -1039,7 +1039,7 @@ export class Organization implements PluginHost {
       spec = {
         ...spec,
         cwd: spec.cwd ?? a.settings.cwd ?? process.cwd(),
-        env: { ...process.env, ...a.settings.env, ...spec.env, ...context.env,
+        env: { ...(spec.inheritEnv === false ? {} : { ...process.env, ...a.settings.env }), ...spec.env, ...context.env,
           ORG_SOCKET: this.socketPath, ORG_TOKEN: token, ORG_AGENT_ID: a.id },
       };
       for (const hook of this.launchValidators)
