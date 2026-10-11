@@ -1,10 +1,13 @@
 import { resolve, join } from "node:path";
+import { mkdir } from "node:fs/promises";
+import { homedir } from "node:os";
 import { isDeepStrictEqual } from "node:util";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { z } from "zod";
 import type * as acp from "@agentclientprotocol/sdk";
 import { Store } from "./store.ts";
 import { workerArgs } from "./runtime.ts";
+import { completePath } from "./path-completion.ts";
 import { AgentProcess, deadline } from "./process.ts";
 import { pluginError, pluginHost, pluginTimeout } from "./plugin-host.ts";
 import type {
@@ -67,6 +70,7 @@ export class Organization implements PluginHost {
   readonly operations = new Map<string, Operation>();
   readonly limits: Limits;
   readonly store: Store;
+  readonly cwd = process.cwd();
   private runtimes = new Map<string, Runtime>();
   private tokens = new Map<string, string>();
   private harnesses = new Map<string, HarnessPlugin>();
@@ -526,6 +530,8 @@ export class Organization implements PluginHost {
             )
             .map((a) => structuredClone(a)),
           capabilities: {
+            cwd: this.cwd,
+            pathCompletion: true,
             harnesses: [...this.harnesses.keys()].sort(),
             modelDiscovery: [...this.harnesses.values()].filter(h => h.listModels).map(h => h.name).sort(),
             plugins: structuredClone(this.capabilities),
@@ -541,6 +547,28 @@ export class Organization implements PluginHost {
             })
             .map((op) => structuredClone(op)),
         };
+      case "organization.paths": {
+        // Filesystem browsing is a client feature, not an unrestricted agent tool.
+        if (caller.kind === "agent") throw new ApiError("FORBIDDEN", "Path discovery is client-only");
+        const p = z.object({
+          input: z.string().max(4096).refine(value => !value.includes("\0"), "Invalid path").default(""),
+          base: z.string().min(1).max(4096).refine(value => !value.includes("\0"), "Invalid path").optional(),
+          kind: z.enum(["directory", "any"]).default("directory"),
+          limit: z.number().int().min(1).max(50).default(5),
+          create: z.boolean().default(false),
+        }).strict().parse(params);
+        try {
+          const base = resolve(this.cwd, p.base ?? ".");
+          if (p.create) {
+            if (p.kind !== "directory") throw new Error("Only directories can be created");
+            const expanded = p.input === "~" || p.input.startsWith("~/") ? homedir() + p.input.slice(1) : p.input;
+            await mkdir(resolve(base, expanded || "."), { recursive: true });
+          }
+          return await completePath(p.input, base, p.kind, p.limit);
+        } catch (error) {
+          throw new ApiError("INVALID_PATH", `Cannot list directory: ${(error as Error).message}`);
+        }
+      }
       case "organization.providers":
       case "organization.models": {
         const p = z.object({

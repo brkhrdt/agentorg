@@ -42,6 +42,12 @@ host.validateLaunch(spec=>{writeFileSync(${JSON.stringify(launchFile)},JSON.stri
       try { client = await OrganizationClient.connect(socket); }
       catch { if (Date.now() > deadline) throw new Error("Binary server did not start"); await Bun.sleep(20); }
     }
+    const snapshot = await client.request<{ capabilities: { cwd: string; pathCompletion: boolean } }>('organization.snapshot');
+    expect(snapshot.capabilities.cwd).toBe(dir);
+    expect(snapshot.capabilities.pathCompletion).toBe(true);
+    expect(await client.request('organization.paths', { input: './' })).toMatchObject({
+      path: dir, isDirectory: true, entries: [{ name: 'data', path: dataDir, kind: 'directory' }],
+    });
     const unknown = await client.wait(await client.request<Operation>('agent.create', { settings: { harness: 'pi', model: 'test-model' } }));
     expect(unknown.status).toBe('failed');
     expect(unknown.error?.code).toBe('INVALID_HARNESS');
