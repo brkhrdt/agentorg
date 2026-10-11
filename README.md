@@ -67,7 +67,7 @@ The client creates a Pi root using **`openai-codex/gpt-6-luna`**, subscribes to 
 
 ## Client API
 
-See [`client_spec.md`](client_spec.md) for the complete client implementation contract, schemas, event payloads, reconnect procedure, and current limitations.
+The JSONL client contract, request schemas, event payloads, and reconnect behavior are documented here alongside the API implementation.
 
 Every record ends with LF. Literal Unicode line/paragraph separators are supported. IDs correlate responses; events may precede responses and concurrent requests may finish out of order. `settings.model` is optional; with the Pi plugin, omit it to use Pi's configured default model (the literal string `"default"` is not a model ID).
 
@@ -96,6 +96,7 @@ Errors: `{"kind":"response","id":"1","ok":false,"error":{"code":"CONFLICT","mess
 | `agent.stop`            | `{agentId}`; stops only that agent, not children                                                                                    |
 | `organization.providers` | `{harness, cwd?, env?, options?}`; available providers for a discovery-capable harness |
 | `organization.models` | `{harness, provider, cwd?, env?, options?}`; available models for the selected provider |
+| `organization.paths` | `{input?, base?, kind?: "directory" \| "any", limit?, create?}`; server-side fuzzy path candidates (five by default); client-only; `create: true` recursively creates the requested directory |
 | `agent.restart`         | `{agentId}`; restarts only that agent; context retention depends on harness session-loading capability                              |
 | `agent.restart_subtree` | `{agentId}`; stops child-first, starts parent-first, continues after individual startup failures                                    |
 | `agent.replace_session` | `{agentId}`; new context/session number, descendants unaffected                                                                     |
@@ -156,6 +157,8 @@ Pi confirm/select dialogs become ACP permission requests. Clients choose with `p
 ## Plugins
 
 Trusted TypeScript modules export `ServerPlugin` with `apiVersion: 1`, `name`, and `setup(host)`; load explicit paths with repeatable `--plugin`. API types live in `src/plugin.ts`; incompatible versions and duplicate names fail startup. The generic extension APIs are additive within v1; plugins using the removed pre-1.0 feature-manager API must upgrade in this coordinated contract replacement. See [extension contract and commit boundaries](EXTENSIONS.md).
+
+Snapshots advertise `capabilities.cwd` (server startup directory) and `capabilities.pathCompletion` for the client-only `organization.paths` query. Path discovery supports relative/absolute paths, `~/`, hidden entries when typing `.`, and directory symlinks; it returns absolute paths without bypassing workspace-policy validation. Queries are read-only unless `create: true` is explicitly supplied to recursively create the requested directory.
 
 Harnesses may implement optional `listModels(context)` returning `{provider, id, name?}` entries. The host advertises those harnesses in `snapshot.capabilities.modelDiscovery` and exposes read-only `organization.providers`/`organization.models` queries (select a provider first). Discovery receives draft `cwd`, `env`, and `options`, is timeout-bounded, and returns only public model identifiers/display names. No harness is launched by core for discovery; legacy harnesses remain valid and clients can use manual entry.
 
