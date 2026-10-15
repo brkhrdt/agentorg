@@ -6,6 +6,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { z } from "zod";
 import type * as acp from "@agentclientprotocol/sdk";
 import { Store } from "./store.ts";
+import { ServerSettingsRegistry, coreSettings, type ServerSettingsDefinition } from "./server-settings.ts";
 import { workerArgs } from "./runtime.ts";
 import { completePath } from "./path-completion.ts";
 import { AgentProcess, deadline } from "./process.ts";
@@ -71,6 +72,8 @@ export class Organization implements PluginHost {
   readonly limits: Limits;
   readonly store: Store;
   readonly cwd = process.cwd();
+  private readonly serverSettingsRegistry: ServerSettingsRegistry;
+  private loadedPlugins: string[] = [];
   private runtimes = new Map<string, Runtime>();
   private tokens = new Map<string, string>();
   private harnesses = new Map<string, HarnessPlugin>();
@@ -121,6 +124,11 @@ export class Organization implements PluginHost {
     if (this.limits.maxResponseBytes < 256)
       throw new Error("maxResponseBytes must be at least 256");
     this.store = new Store(join(dataDir, "organization.sqlite"));
+    this.serverSettingsRegistry = new ServerSettingsRegistry(this.store);
+    try {
+      this.serverSettingsRegistry.register(coreSettings(this.limits));
+      Object.assign(this.limits, this.serverSettingsRegistry.values("core"));
+    } catch (error) { this.store.close(); throw error; }
     for (const a of this.store.agents()) this.agents.set(a.id, a);
     for (const op of this.store.operations()) this.operations.set(op.id, op);
     this.registerBuiltinTools();
@@ -131,10 +139,18 @@ export class Organization implements PluginHost {
         `${plugin.name}: requires unsupported API ${plugin.apiVersion}`,
       );
     try {
+      if (this.loadedPlugins.includes(plugin.name)) throw new Error("Duplicate plugin name");
       await plugin.setup(pluginHost(this, plugin.name));
+      this.loadedPlugins.push(plugin.name);
     } catch (error) {
       throw pluginError(plugin.name, error);
     }
+  }
+  registerServerSettings(definition: ServerSettingsDefinition) {
+    this.serverSettingsRegistry.register(definition);
+  }
+  serverSettings(namespace: string): Record<string, unknown> {
+    return this.serverSettingsRegistry.values(namespace);
   }
   registerSettings(extension: ExtensionSettings) {
     if (!/^[a-z][a-z0-9.-]*$/.test(extension.namespace) || this.extensionSettings.has(extension.namespace))
@@ -312,6 +328,10 @@ export class Organization implements PluginHost {
       },
       this.limits.maxEvents,
     );
+    this.publishEvent(event);
+  }
+  private publishEvent(event: ServerEvent) {
+    const { type } = event;
     for (const listener of this.listeners) {
       try {
         listener(event);
@@ -523,11 +543,38 @@ export class Organization implements PluginHost {
     params: unknown = {},
     caller: Caller = { kind: "server", id: "server" },
   ): Promise<unknown> {
-    if (this.mutationContext.getStore() && /^(agent\.(create|modify|stop|restart|restart_subtree|replace_session|remove|prompt)|operation\.(wait|cancel))$/.test(method))
+    if (this.mutationContext.getStore() && /^(agent\.(create|modify|stop|restart|restart_subtree|replace_session|remove|prompt)|operation\.(wait|cancel)|organization\.settings\.update)$/.test(method))
       throw new ApiError("NESTED_MUTATION", "Lifecycle hooks cannot enqueue or wait for mutations");
     if (this.closing)
       throw new ApiError("SHUTTING_DOWN", "Server is shutting down");
     switch (method) {
+      case "organization.settings.list": {
+        if (caller.kind === "agent") throw new ApiError("FORBIDDEN", "Server settings are client-only");
+        z.object({}).strict().parse(params);
+        return {
+          groups: this.serverSettingsRegistry.descriptors().map(g => this.serverSettingsRegistry.get(g.namespace)),
+          facts: { cwd: this.cwd, dataDir: this.dataDir, socketPath: this.socketPath, harnesses: [...this.harnesses.keys()].sort(), plugins: [...this.loadedPlugins] },
+        };
+      }
+      case "organization.settings.get": {
+        if (caller.kind === "agent") throw new ApiError("FORBIDDEN", "Server settings are client-only");
+        const p = z.object({ namespace: z.string() }).strict().parse(params);
+        return this.serverSettingsRegistry.get(p.namespace);
+      }
+      case "organization.settings.update": {
+        if (caller.kind === "agent") throw new ApiError("FORBIDDEN", "Server settings are client-only");
+        return this.serialize(async () => {
+          if (this.closing) throw new ApiError("SHUTTING_DOWN", "Server is shutting down");
+          const result = await this.mutationContext.run(true, () => this.serverSettingsRegistry.change(params, (record, data) => this.store.db.transaction(() => {
+            if (this.closing) throw new ApiError("SHUTTING_DOWN", "Server is shutting down");
+            this.store.saveServerSettings(record);
+            return this.store.event({ kind: "event", time: now(), type: "organization.settings.changed", data }, this.limits.maxEvents);
+          })()));
+          Object.assign(this.limits, this.serverSettingsRegistry.values("core"));
+          if (result.event) this.publishEvent(result.event);
+          return result.view;
+        });
+      }
       case "organization.snapshot":
         return {
           seq: this.store.sequence(),
@@ -539,6 +586,10 @@ export class Organization implements PluginHost {
             .map((a) => structuredClone(a)),
           capabilities: {
             cwd: this.cwd,
+            ...(caller.kind !== "agent" && { serverSettings: {
+              version: 1, groups: this.serverSettingsRegistry.descriptors(),
+              endpoints: { list: "organization.settings.list", get: "organization.settings.get", update: "organization.settings.update" },
+            }, loadedPlugins: [...this.loadedPlugins] }),
             pathCompletion: true,
             harnesses: [...this.harnesses.keys()].sort(),
             modelDiscovery: [...this.harnesses.values()].filter(h => h.listModels).map(h => h.name).sort(),

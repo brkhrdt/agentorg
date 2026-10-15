@@ -59,6 +59,17 @@ namespace through both its advertised form and raw extensions in one draft (the
 client rejects ambiguous changes). Podman's specialized image propagation remains
 an explicit client-only operation, not a generic UI hook.
 
+## Server-wide public settings
+
+`registerSettings` above remains **per-agent** only. The additive
+`registerServerSettings` API declares public server-wide configuration; core owns
+its storage, revisions, client-only authorization, reset and change events.
+Plugins read detached effective values with `serverSettings(namespace)` at the
+appropriate runtime/launch boundary. Fields declare immediate, future-launch or
+server-restart effects. Existing plugins need not opt in. Secrets are excluded,
+and there is no settings MCP tool. See [the server settings contract](SERVER_SETTINGS.md)
+for descriptors, validation, migrations and client APIs.
+
 ## Lifecycle participants
 
 Lifecycle participants prepare inside the server's serialized queue, before an

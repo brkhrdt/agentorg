@@ -71,6 +71,17 @@ export function pluginHost(host: PluginHost, name: string): PluginHost {
         ...(extension.migrate && { migrate: wrap(extension.migrate.bind(extension)) }),
       });
     },
+    registerServerSettings(definition) {
+      if (definition.namespace === "core") throw new Error("core server settings are reserved");
+      host.registerServerSettings({
+        ...definition,
+        plugin: name,
+        validate: wrap(definition.validate.bind(definition)),
+        ...(definition.migrate && { migrate: wrap(definition.migrate.bind(definition)) }),
+        ...(definition.validateChange && { validateChange: wrap(definition.validateChange.bind(definition)) }),
+      });
+    },
+    serverSettings: namespace => host.serverSettings(namespace),
     registerCapability: (namespace, value) => host.registerCapability(namespace, value),
     beforeMutation: handler => host.beforeMutation(wrap(handler, mutation)),
     onInitialize: handler => host.onInitialize(wrap(handler)),

@@ -200,9 +200,26 @@ The optional [`@agentorg/plugin-podman`](../agentorg-plugin-podman/README.md) ru
 
 Load Podman after other launch-transforming plugins. Images contain the harness and startup/MCP helpers; see its example Pi Containerfile/build script. The plugin mounts only explicit grants, the agent's private session directory, and a capability-scoped MCP relay—not the public organization socket or database. No host credentials/environment are implicitly copied. See its README for isolation boundaries and real-Podman tests.
 
+## Server-wide settings
+
+Trusted clients can discover and edit public server configuration through
+`organization.settings.list/get/update`. Core owns persistence, revisions,
+authorization, reset-to-default behavior, and `organization.settings.changed`
+events. Agents cannot call these endpoints, and no settings MCP tool exists.
+Snapshots advertise portable descriptors under `capabilities.serverSettings`.
+The initial `core` group exposes runtime limits; facts remain read-only. Plugins
+can opt in later using `registerServerSettings` and `serverSettings`, independently
+of per-agent `registerSettings`. Secrets are excluded.
+
+Saved overrides beat startup/operator defaults and survive restart. Saves require
+`expectedRevision`; resetting fields removes their overrides. Lists are replaced
+as whole fields, so clients can explicitly delete entries. `maxLineBytes` requires
+a server restart; other core limits apply at subsequent checks. Changes never
+automatically restart agents. See [server settings API and plugin contract](SERVER_SETTINGS.md).
+
 ## Persistence, limits, and recovery
 
-`limits.json` is a flat object of overrides (unknown keys/nonpositive values are rejected). Defaults:
+`limits.json` is a flat object of startup defaults (unknown keys/nonpositive values are rejected). Persisted server-settings overrides take precedence; resetting a field restores its current startup default. Built-in defaults:
 
 | Limit                                           |          Default |
 | ----------------------------------------------- | ---------------: |

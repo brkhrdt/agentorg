@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { mkdirSync, chmodSync } from "node:fs";
 import { dirname } from "node:path";
 import type { AgentRecord, Operation, ServerEvent } from "./types.ts";
+import type { ServerSettingsRecord } from "./server-settings.ts";
 
 /** Records are durable; only bounded event and terminal-operation history is pruned. */
 export class Store {
@@ -15,12 +16,20 @@ export class Store {
       INSERT OR IGNORE INTO meta VALUES ('schema', 1), ('sequence', 0);
       CREATE TABLE IF NOT EXISTS agents (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS server_settings (namespace TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY, agent_id TEXT, data TEXT NOT NULL);`);
     const version = this.db
       .query<{ value: number }, []>("SELECT value FROM meta WHERE key='schema'")
       .get()!.value;
     if (version !== 1)
       throw new Error(`Unsupported database schema ${version}`);
+  }
+  serverSettings(namespace: string): ServerSettingsRecord | undefined {
+    const row = this.db.query<{ data: string }, [string]>("SELECT data FROM server_settings WHERE namespace=?").get(namespace);
+    return row ? JSON.parse(row.data) : undefined;
+  }
+  saveServerSettings(record: ServerSettingsRecord) {
+    this.db.query("INSERT OR REPLACE INTO server_settings VALUES (?, ?)").run(record.namespace, JSON.stringify(record));
   }
   agents(): AgentRecord[] {
     return this.rows("agents");

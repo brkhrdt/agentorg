@@ -1,6 +1,9 @@
 import type { McpServer } from "@agentclientprotocol/sdk";
 import type { AgentRecord, Caller, ServerEvent, Settings } from "./types.ts";
 
+import type { ServerSettingsDefinition } from "./server-settings.ts";
+export type { ServerSettingsDefinition, ServerSettingsDescriptor, ServerSettingsField, ServerSettingsView, SettingsEffect } from "./server-settings.ts";
+
 export const PLUGIN_API_VERSION = 1 as const;
 export interface LaunchSpec {
   command: string;
@@ -101,6 +104,10 @@ export interface ExtensionSettings {
 export interface PluginHost {
   readonly dataDir: string;
   registerSettings(extension: ExtensionSettings): void;
+  /** Server-wide public configuration; distinct from per-agent registerSettings. */
+  registerServerSettings(definition: ServerSettingsDefinition): void;
+  /** Effective public configuration, including persisted overrides. Returns a detached copy. */
+  serverSettings(namespace: string): Record<string, unknown>;
   registerCapability(namespace: string, value: unknown): void;
   beforeMutation(handler: (context: MutationContext) => MutationChange | void | Promise<MutationChange | void>): void;
   onInitialize(handler: (agents: Readonly<AgentRecord>[]) => void | Promise<void>): void;
