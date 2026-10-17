@@ -89,7 +89,7 @@ Errors: `{"kind":"response","id":"1","ok":false,"error":{"code":"CONFLICT","mess
 
 | Method                  | Parameters / behavior                                                                                                               |
 | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| `organization.snapshot` | `{}`; active **and historical** agent records, retained operations, current sequence                                                |
+| `organization.snapshot` | `{includeTerminalOperations?: boolean}`; all agent records, operations, current sequence; default includes terminal operations |
 | `agent.create`          | `{parentId?: string                                                                                                                 | null, name?, metadata?, settings}`; omitted parent creates root |
 | `agent.get`             | `{agentId}`; includes removed records                                                                                               |
 | `agent.modify`          | `{agentId, expectedRevision?, name?, metadata?, settings?}`; partial settings merge, `options`/`env` replace rather than deep-merge |
@@ -108,6 +108,8 @@ Errors: `{"kind":"response","id":"1","ok":false,"error":{"code":"CONFLICT","mess
 | `subscribe`             | `{enabled?, types?, excludeTypes?, agentIds?, subtrees?}`; replaces this connection's filter; default all live events               |
 | `events.history`        | `{after?: number, limit?: number, agentId?}`; retained events after a sequence, max page size 1000, exact agent filter              |
 | `permission.respond`    | `{permissionId, optionId? , cancelled?}`; select an offered option or cancel                                                        |
+
+For repeated state refreshes, pass `includeTerminalOperations: false` to avoid resending completed/failed/stopped operations and their accumulated prompt results. Active operations and all authorized agent records remain included. The default full snapshot is unchanged and can exceed client-output limits with large retained operation bodies; use lightweight snapshots plus `operation.get` and paged `events.history` for details. This option is also available on the `organization_snapshot` MCP tool.
 
 Operations contain caller, target, type, input, status, creation/start/completion timestamps, result/error, and optional `cancelRequested`. Statuses: `queued`, `running`, `completed`, `failed`, `stopped`. Last three are terminal. Prompt results contain bounded `text`, `truncated`, and ACP `stopReason`. Metadata and launch changes increment agent revisions; state changes do not. Metadata-only modifications preserve the generation. Changes to launch settings restart active agents; stopped/failed agents remain stopped/failed until explicitly restarted.
 
@@ -199,6 +201,10 @@ This is launch-time workspace validation, **not a filesystem sandbox**. Agents s
 The optional [`@agentorg/plugin-podman`](../agentorg-plugin-podman/README.md) runs every agent in a separate rootless container, using inherited images and explicit `settings.extensions.podman.readOnlyDirs` / `readWriteDirs` grants. `cwd` must be explicitly mounted. Agent grants cannot exceed caller/direct-parent permissions; trusted clients can add external directories. MCP create/modify tools gain directory grant arrays, and the TUI offers image-change scopes (node only, inheriting descendants, all descendants).
 
 Load Podman after other launch-transforming plugins. Images contain the harness and startup/MCP helpers; see its example Pi Containerfile/build script. The plugin mounts only explicit grants, the agent's private session directory, and a capability-scoped MCP relay—not the public organization socket or database. No host credentials/environment are implicitly copied. See its README for isolation boundaries and real-Podman tests.
+
+### Synthetic harness benchmark (separate repository)
+
+[`@agentorg/plugin-harness-bench`](../agentorg-plugin-harness-bench/README.md) provides a fake ACP harness and unattended experiment runner. It grows a real agent tree over MCP up to configured server capacity, then repeats seeded thought/text/tool activity through normal ACP and SQLite persistence. Runs retain data for resume, collect raw-client/latency/resource metrics, and allow the TUI to attach. No model credentials or automatic server-limit changes are required; larger limits are explicit startup configuration. See its README for workload controls, recovery, and measurement caveats.
 
 ## Server-wide settings
 

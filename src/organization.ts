@@ -575,7 +575,10 @@ export class Organization implements PluginHost {
           return result.view;
         });
       }
-      case "organization.snapshot":
+      case "organization.snapshot": {
+        const { includeTerminalOperations } = z.object({
+          includeTerminalOperations: z.boolean().default(true),
+        }).strict().parse(params);
         return {
           seq: this.store.sequence(),
           agents: [...this.agents.values()]
@@ -598,6 +601,7 @@ export class Organization implements PluginHost {
           },
           operations: [...this.operations.values()]
             .filter((op) => {
+              if (!includeTerminalOperations && terminal(op)) return false;
               try {
                 this.authorizeOp(caller, op);
                 return true;
@@ -607,6 +611,7 @@ export class Organization implements PluginHost {
             })
             .map((op) => structuredClone(op)),
         };
+      }
       case "organization.paths": {
         // Filesystem browsing is a client feature, not an unrestricted agent tool.
         if (caller.kind === "agent") throw new ApiError("FORBIDDEN", "Path discovery is client-only");
@@ -1426,8 +1431,8 @@ export class Organization implements PluginHost {
     add(
       "organization_snapshot",
       "organization.snapshot",
-      "List your subtree and operations.",
-      {},
+      "List your subtree and operations. Omit terminal operations for lightweight state refreshes.",
+      { includeTerminalOperations: { type: "boolean" } },
     );
     for (const action of [
       "stop",
