@@ -10,7 +10,8 @@ import type { PluginHost, ServerPlugin } from "../src/plugin.ts";
 const settings = { harness: "fixture", options: {} };
 async function withOrg(run: (org: Organization, dir: string) => Promise<void>) {
   const dir = mkdtempSync(join(tmpdir(), "plugin-errors-"));
-  const org = new Organization(join(dir, "server.sock"), dir, { startTimeoutMs: 100, stopTimeoutMs: 50, killTimeoutMs: 50 });
+  // Real ACP subprocess startup can exceed 100ms in the complete suite/on loaded CI.
+  const org = new Organization(join(dir, "server.sock"), dir, { startTimeoutMs: 1000, stopTimeoutMs: 50, killTimeoutMs: 50 });
   try { await run(org, dir); }
   finally { await org.close(); rmSync(dir, { recursive: true, force: true }); }
 }

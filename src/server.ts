@@ -37,6 +37,7 @@ const subscriptionSchema = z
     agentIds: z.array(z.string()).optional(),
     subtrees: z.boolean().default(false),
     enabled: z.boolean().default(true),
+    renderings: z.boolean().default(false),
   })
   .strict();
 type Subscription = z.infer<typeof subscriptionSchema>;
@@ -152,6 +153,7 @@ export class OrganizationServer {
       excludeTypes: [],
       enabled: true,
       subtrees: false,
+      renderings: false,
     };
     let eventCaller: Caller = { kind: "client", id: crypto.randomUUID() };
     let internal = false;
@@ -192,7 +194,13 @@ export class OrganizationServer {
       return true;
     };
     const unsubscribe = this.organization.subscribe((event) => {
-      if (matches(event)) send(event);
+      if (matches(event)) {
+        if (filter.renderings && eventCaller.kind !== "agent") {
+          const rendering = this.organization.renderEvent(event);
+          if (rendering) send({ kind: "presentation", seq: event.seq, rendering });
+        }
+        send(event);
+      }
     });
     const handle = async (line: string) => {
       let id: string | number | null = null;

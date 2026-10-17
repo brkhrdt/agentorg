@@ -79,6 +79,29 @@ stop existing processes, or cancel active prompts; admissions are constrained.
 History retention changes prune on subsequent event/operation writes. No save
 changes any agent's revision or generation or automatically restarts agents.
 
+## Rendering defaults
+
+The built-in `rendering` group has one immediate setting:
+`defaultToolRenderer` (default `core.tools`). It selects a **server-owned registry
+candidate**, after a harness's own matching renderers and before `generic`.
+`core.tools` supplies distinct read/bash/edit/write formats; `generic` displays
+arguments/output for any tool. Plugins may register additional named candidates
+with `host.registerRenderer()`. Discover public IDs/names/examples with
+`events.renderers {}`; only unqualified IDs (without a harness prefix) can be
+selected here. The settings picker uses `events.renderer-choices {}` to list
+server-default candidates (client-only, no harness-owned IDs). An unknown/unavailable/nonmatching ID safely falls back to generic,
+including after a plugin is disabled. This keeps persisted settings portable.
+
+```json
+{"namespace":"rendering","expectedRevision":0,"patch":{"defaultToolRenderer":"generic"}}
+```
+
+Changes affect subsequent presentation/live deliveries and history reads, never
+stored event envelopes or running agents. Already downloaded client presentations
+can remain cached until that history is reloaded. Chat summary/extended/full/raw
+levels and per-tool subtype overrides remain **client-only** preferences.
+See [the renderer plugin/transport contract](EXTENSIONS.md#event-renderers-presentation-contract-v1).
+
 ## Plugin contract
 
 Register during `setup` using the additive `PluginHost` methods:
@@ -109,7 +132,7 @@ const config = host.serverSettings("example");
 
 `serverSettings(namespace)` returns a detached copy of **effective** configuration.
 The scoped host automatically attributes the descriptor and callback errors to
-its plugin. `core` is reserved. Schemas, display metadata, defaults, normalization,
+its plugin. `core` and `rendering` are reserved. Schemas, display metadata, defaults, normalization,
 and any nested resource policies belong to the plugin; storage, fencing, and
 client-only access remain core-owned. Plugins may observe the normal settings
 change event for cache invalidation, but must not rely on asynchronous observers

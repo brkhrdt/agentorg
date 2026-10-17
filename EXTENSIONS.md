@@ -70,6 +70,92 @@ server-restart effects. Existing plugins need not opt in. Secrets are excluded,
 and there is no settings MCP tool. See [the server settings contract](SERVER_SETTINGS.md)
 for descriptors, validation, migrations and client APIs.
 
+## Event renderers (presentation contract v1)
+
+API v1 adds optional `HarnessPlugin.renderers` and `host.registerRenderer()`.
+Existing harnesses need no changes. Renderers run **only on the trusted server**;
+clients receive Markdown and JSON metadata, never callbacks or Pi TUI components.
+A harness can customize **any event type** associated with its agents, not just
+calls/results. Tool-specific matches use `data.toolName`, then `data.title`, never
+the broad ACP `kind` (`edit`, `read`, etc.). Adapters should retain exact identity
+and arguments on updates/results too; missing identity safely uses a fallback.
+
+```ts
+import { renderTool, toolExamples, type EventRenderer } from "agent-organization/plugin";
+
+const readRenderer: EventRenderer = {
+  id: "read", name: "My read style", tool: "read",
+  eventTypes: ["tool.call", "tool.update", "tool.result"],
+  examples: toolExamples("read"), // synthetic PUBLIC samples
+  render(event) {
+    return renderTool(event); // or your harness's own pure formatter
+  },
+};
+host.registerHarness({ name: "my-harness", renderers: [readRenderer], launch });
+// Optional server-default candidate, selected by its ID in server settings:
+host.registerRenderer({ ...readRenderer, id: "my-plugin.read" });
+```
+
+A callback receives a detached event and returns `{summary, extended, full}`:
+
+- `summary`: exactly one nonempty logical line; used in the tree regardless of chat level.
+- `extended`: at most two logical lines. Clients may wrap these onto more screen rows.
+- `full`: all relevant available content, including status/errors and partial/truncation markers.
+- **Raw is not a callback output.** It is always the complete original event envelope.
+
+Return Markdown without ANSI escapes, terminal commands, HTML-dependent styling,
+or client-specific markup. Clients own sanitization, colors, wrapping and clipping.
+Use fenced code/diff blocks for literal content; the public `fenced()` helper
+handles embedded backticks. `renderTool()` supplies portable read/bash/edit/write
+styles and a generic unknown-tool representation. Call/update/result phases are
+separate; a missing result is not a successful empty result. No filesystem reads
+or native Pi render-component execution is needed to render retained history.
+
+Callbacks must be synchronous, pure, deterministic and bounded (no I/O). Plugins
+are trusted; synchronous code cannot be preempted. Throwing, async or malformed
+outputs fall through to the next tier without breaking delivery. Core enforces
+the logical line caps, marks truncation, substitutes `—` for an empty summary,
+and bounds summary/extended/full text to 8 KiB/16 KiB/2 MiB respectively. This
+presentation bounding never changes a retained/raw event.
+
+Resolution: matching current-agent harness renderer (exact tool matches before
+type-wide matches, then registration order), then the configured server-default
+candidate, then `generic`. The built-in `core.tools` candidate distinguishes
+read/bash/edit/write; unknown tools use generic fields. Non-tool events retain
+client generic rendering unless their harness explicitly matches them. Harness
+IDs are **not persisted on events**: changing an agent's harness, server default,
+or renderer implementation may change rendering when history is fetched again.
+No schema migration or replayed tool execution is involved.
+
+`examples` contains 1–8 synthetic `{type, data}` events, covering the relevant
+phases. The server generates all four level previews by invoking the real
+callback; raw is generated from the unchanged synthetic envelope. Never put real
+session data or secrets in examples/names. Public catalog records contain only
+IDs, names, event types, optional tool/harness, and generated examples. Harness
+IDs are qualified as `<harness>/<renderer.id>`; server-default IDs are unqualified.
+
+Client transport is opt-in and additive:
+
+- Non-agent snapshots advertise `capabilities.rendering = {version: 1, catalog: "events.renderers"}`.
+- `events.renderers {}` returns `{version: 1, renderers: [...]}` (client-only).
+- `subscribe {renderings: true}` sends a separate
+  `{kind: "presentation", seq, rendering: {rendererId, subtype?, summary, extended, full}}`
+  **before** its unchanged event frame. Filters apply to both; agent subscriptions
+  never receive presentation frames.
+- `events.history {after, limit, agentId?, renderings: true}` adds a `renderings`
+  object keyed by sequence number; `events` remains untouched. Agent history
+  omits this sidecar. Default subscriptions/history responses are unchanged.
+
+The public `OrganizationClient` exposes `onPresentation((seq, rendering) => …)`
+separately from `onEvent`; presentation remains opt-in via `subscribe`.
+Clients should negotiate version 1, ignore unsupported versions, keep sidecars
+outside event records, and retain generic rendering when presentation is absent.
+Do not merge harness-rendered message chunks unless the renderer supports it.
+Chat level preferences may use `<event.type>:<tool>` subtypes inheriting their
+parent event type; they do not select the server renderer. Presentation contract
+breaking changes require a new capability version; plugin API breaking changes
+require a new `apiVersion`. See [server defaults](SERVER_SETTINGS.md).
+
 ## Lifecycle participants
 
 Lifecycle participants prepare inside the server's serialized queue, before an

@@ -1,5 +1,6 @@
 import { createConnection, type Socket } from "node:net";
 import { JsonLines } from "./jsonl.ts";
+import type { EventRendering } from "./rendering.ts";
 import {
   ApiError,
   type ServerEvent,
@@ -18,6 +19,7 @@ export class OrganizationClient {
     }
   >();
   private listeners = new Set<(event: ServerEvent) => void>();
+  private presentationListeners = new Set<(seq: number, rendering: EventRendering) => void>();
   private constructor(
     socketPath: string,
     private token?: string,
@@ -30,6 +32,12 @@ export class OrganizationClient {
           try {
             listener(record);
           } catch {}
+        }
+        return;
+      }
+      if (record.kind === "presentation") {
+        for (const listener of this.presentationListeners) {
+          try { listener(record.seq, record.rendering); } catch {}
         }
         return;
       }
@@ -64,6 +72,11 @@ export class OrganizationClient {
   onEvent(listener: (event: ServerEvent) => void) {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+  /** Opt in with subscribe({renderings: true}) after negotiating capability version 1. */
+  onPresentation(listener: (seq: number, rendering: EventRendering) => void) {
+    this.presentationListeners.add(listener);
+    return () => this.presentationListeners.delete(listener);
   }
   request<T = unknown>(
     method: string,

@@ -4,6 +4,10 @@ import type { AgentRecord, Caller, ServerEvent, Settings } from "./types.ts";
 import type { ServerSettingsDefinition } from "./server-settings.ts";
 export type { ServerSettingsDefinition, ServerSettingsDescriptor, ServerSettingsField, ServerSettingsView, SettingsEffect } from "./server-settings.ts";
 
+import type { EventRenderer } from "./rendering.ts";
+export type { EventRenderer, RenderLevels, EventRendering, RendererMetadata } from "./rendering.ts";
+export { renderTool, toolExamples, fenced } from "./rendering.ts";
+
 export const PLUGIN_API_VERSION = 1 as const;
 export interface LaunchSpec {
   command: string;
@@ -41,6 +45,8 @@ export interface HarnessModel {
 }
 export interface HarnessPlugin {
   name: string;
+  /** Optional presentation contract v1; tool-specific matches precede type-wide matches. */
+  renderers?: EventRenderer[];
   /** Available models using server-side credentials/configuration; never return secrets. */
   listModels?(context: ModelDiscoveryContext): HarnessModel[] | Promise<HarnessModel[]>;
   /** Launch a stdio ACP v1 agent; non-ACP harnesses must supply an adapter. */
@@ -114,6 +120,8 @@ export interface PluginHost {
   prepareLaunch(handler: (context: LaunchContext) => void | Promise<void>): void;
   validateLaunch(handler: (spec: LaunchSpec, context: LaunchContext) => void | Promise<void>): void;
   registerHarness(harness: HarnessPlugin): void;
+  /** Register a server-default candidate, selectable via rendering.defaultToolRenderer. */
+  registerRenderer(renderer: EventRenderer): void;
   registerEndpoint(
     name: string,
     handler: (params: unknown, caller: Caller) => unknown | Promise<unknown>,

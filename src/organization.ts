@@ -6,6 +6,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { z } from "zod";
 import type * as acp from "@agentclientprotocol/sdk";
 import { Store } from "./store.ts";
+import { RendererRegistry, type EventRenderer } from "./rendering.ts";
 import { ServerSettingsRegistry, coreSettings, type ServerSettingsDefinition } from "./server-settings.ts";
 import { workerArgs } from "./runtime.ts";
 import { completePath } from "./path-completion.ts";
@@ -77,6 +78,7 @@ export class Organization implements PluginHost {
   private runtimes = new Map<string, Runtime>();
   private tokens = new Map<string, string>();
   private harnesses = new Map<string, HarnessPlugin>();
+  private renderers = new RendererRegistry();
   private endpoints = new Map<
     string,
     (params: unknown, caller: Caller) => unknown | Promise<unknown>
@@ -127,6 +129,7 @@ export class Organization implements PluginHost {
     this.serverSettingsRegistry = new ServerSettingsRegistry(this.store);
     try {
       this.serverSettingsRegistry.register(coreSettings(this.limits));
+      this.serverSettingsRegistry.register(this.renderers.settings());
       Object.assign(this.limits, this.serverSettingsRegistry.values("core"));
     } catch (error) { this.store.close(); throw error; }
     for (const a of this.store.agents()) this.agents.set(a.id, a);
@@ -244,7 +247,13 @@ export class Organization implements PluginHost {
   registerHarness(harness: HarnessPlugin) {
     if (this.harnesses.has(harness.name))
       throw new Error(`Duplicate harness ${harness.name}`);
+    this.renderers.registerHarness(harness.name, harness.renderers ?? []);
     this.harnesses.set(harness.name, harness);
+  }
+  registerRenderer(renderer: EventRenderer) { this.renderers.register(renderer); }
+  renderEvent(event: ServerEvent) {
+    const harness = event.agentId ? this.agents.get(event.agentId)?.settings.harness : undefined;
+    return this.renderers.render(event, harness, String(this.serverSettings("rendering").defaultToolRenderer));
   }
   registerEndpoint(
     name: string,
@@ -548,6 +557,16 @@ export class Organization implements PluginHost {
     if (this.closing)
       throw new ApiError("SHUTTING_DOWN", "Server is shutting down");
     switch (method) {
+      case "events.renderer-choices": {
+        if (caller.kind === "agent") throw new ApiError("FORBIDDEN", "Renderer discovery is client-only");
+        z.object({}).strict().parse(params);
+        return { choices: this.renderers.choices() };
+      }
+      case "events.renderers": {
+        if (caller.kind === "agent") throw new ApiError("FORBIDDEN", "Renderer discovery is client-only");
+        z.object({}).strict().parse(params);
+        return { version: 1, renderers: this.renderers.catalog() };
+      }
       case "organization.settings.list": {
         if (caller.kind === "agent") throw new ApiError("FORBIDDEN", "Server settings are client-only");
         z.object({}).strict().parse(params);
@@ -592,7 +611,7 @@ export class Organization implements PluginHost {
             ...(caller.kind !== "agent" && { serverSettings: {
               version: 1, groups: this.serverSettingsRegistry.descriptors(),
               endpoints: { list: "organization.settings.list", get: "organization.settings.get", update: "organization.settings.update" },
-            }, loadedPlugins: [...this.loadedPlugins] }),
+            }, rendering: { version: 1, catalog: "events.renderers" }, loadedPlugins: [...this.loadedPlugins] }),
             pathCompletion: true,
             harnesses: [...this.harnesses.keys()].sort(),
             modelDiscovery: [...this.harnesses.values()].filter(h => h.listModels).map(h => h.name).sort(),
@@ -953,10 +972,15 @@ export class Organization implements PluginHost {
         });
       }
       case "events.history": {
-        const p = page.parse(params);
+        const p = page.extend({ renderings: z.boolean().default(false) }).parse(params);
         if (caller.kind === "agent" && !p.agentId) p.agentId = caller.id;
         if (p.agentId) this.authorize(caller, p.agentId);
-        return this.store.history(p.after, p.limit, p.agentId);
+        const history = this.store.history(p.after, p.limit, p.agentId);
+        if (!p.renderings || caller.kind === "agent") return history;
+        return { ...history, renderings: Object.fromEntries(history.events.flatMap(event => {
+          const rendering = this.renderEvent(event);
+          return rendering ? [[event.seq, rendering]] : [];
+        })) };
       }
       case "permission.respond": {
         const p = z

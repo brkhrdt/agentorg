@@ -72,7 +72,7 @@ export function pluginHost(host: PluginHost, name: string): PluginHost {
       });
     },
     registerServerSettings(definition) {
-      if (definition.namespace === "core") throw new Error("core server settings are reserved");
+      if (["core", "rendering"].includes(definition.namespace)) throw new Error(`${definition.namespace} server settings are reserved`);
       host.registerServerSettings({
         ...definition,
         plugin: name,
@@ -92,8 +92,10 @@ export function pluginHost(host: PluginHost, name: string): PluginHost {
         ...harness,
         launch: wrap(harness.launch.bind(harness), launchSpec),
         ...(harness.listModels && { listModels: wrap(harness.listModels.bind(harness)) }),
+        ...(harness.renderers && { renderers: harness.renderers.map(renderer => ({ ...renderer, render: wrap(renderer.render.bind(renderer)) })) }),
       });
     },
+    registerRenderer: renderer => host.registerRenderer({ ...renderer, render: wrap(renderer.render.bind(renderer)) }),
     registerEndpoint: (endpoint, handler) => host.registerEndpoint(endpoint, wrap(handler)),
     registerTool: definition => host.registerTool(tool(definition)),
     transformTool: (toolName, transform) => host.transformTool(toolName, wrap(transform, tool)),
