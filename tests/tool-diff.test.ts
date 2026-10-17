@@ -44,7 +44,8 @@ test("edit results prefer actual diff over proposed arguments and strip Pi displ
 test("multiple regions, insertions, deletions, empty and unchanged edits remain distinct", () => {
   const input = { path: "a.ts", edits: [{ oldText: "before\nold\nafter", newText: "before\nnew\nafter" }, { oldText: "", newText: "inserted" }] };
   const rendered = renderTool(event(input));
-  expect(rendered.summary).toContain("+2 / -1 · 2 regions");
+  expect(rendered.summary).toBe("Δ a.ts · +2 / -1");
+  expect(rendered.full).toContain("2 regions");
   expect(rendered.full).toContain("Replacement 1"); expect(rendered.full).toContain("Replacement 2");
   expect(rendered.extendedDiff).toMatchObject({ prefix: "Δ a.ts (2 regions)", before: "old", after: "new ↵ inserted" });
   for (const [oldText, newText, before, after] of [["", "new", "∅", "new"], ["old", "", "old", "∅"], ["a\n\nb", "a\nb", "(blank)", "∅"]]) {
@@ -59,7 +60,7 @@ test("multiple regions, insertions, deletions, empty and unchanged edits remain 
 test("failed edits show the error rather than a misleading green replacement preview", () => {
   const input = { path: "source.ts", edits: [{ oldText: "old", newText: "new" }] };
   const rendered = renderTool(event(input, { status: "failed", rawOutput: { content: [{ type: "text", text: "Could not find old text" }] } }, "tool.result"));
-  expect(rendered.summary).toContain("Could not find old text");
+  expect(rendered.summary).toBe("Δ source.ts · +1 / -1");
   expect(rendered.extendedDiff).toBeUndefined();
   expect(rendered.extended).toContain("Could not find old text");
   expect(rendered.full).toContain("tool failed; may be incomplete");
@@ -74,7 +75,7 @@ test("malformed, huge and incomplete edit data is bounded and retains a raw fall
   const large = editDiff({ oldText: Array.from({ length: 300 }, (_, index) => `a${index}`).join("\n"), newText: Array.from({ length: 300 }, (_, index) => `b${index}`).join("\n") }, {})!;
   expect(large.text).toContain("simplified diff"); expect(large.before).toHaveLength(300); expect(large.after).toHaveLength(300);
   const many = renderTool(event({ edits: Array.from({ length: 65 }, () => ({ oldText: "old", newText: "new" })) }));
-  expect(many.summary).toContain("TRUNCATED"); expect(many.full).toContain("Additional regions omitted");
+  expect(many.extended).toContain("TRUNCATED"); expect(many.full).toContain("Additional regions omitted");
   const registry = new RendererRegistry();
   const escaped = registry.render(event({ path: "a.ts", edits: [{ oldText: "```\nold", newText: "```\nnew" }] }), undefined, "core.tools")!;
   expect(escaped.extendedDiff).toMatchObject({ before: "old", after: "new" });

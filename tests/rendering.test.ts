@@ -93,8 +93,8 @@ for (const tool of ["read", "bash", "edit", "write"]) {
       }
       if (example.type === "tool.result") {
         if (tool === "edit") { expect(rendered.summary).toContain("+1 / -1"); expect(rendered.full).toContain("```diff"); }
-        if (tool === "read") { expect(rendered.summary).toContain("2 lines"); expect(rendered.summary).toContain("offset=10, limit=2"); }
-        if (tool === "write") expect(rendered.summary).toContain("11 bytes");
+        if (tool === "read") { expect(rendered.extended).toContain("2 lines"); expect(rendered.summary).toContain("offset=10, limit=2"); }
+        if (tool === "write") expect(rendered.extended).toContain("11 bytes");
       }
     }
   });
@@ -105,11 +105,12 @@ test("missing, unknown, image, partial, truncated and error results never preten
     expect(renderTool(event("tool.result", data)).full).toContain("Output unavailable");
   }
   const failure = renderTool(event("tool.result", { title: "bash", status: "failed", rawOutput: { content: [{ type: "text", text: "Error: command failed\nexit code: 2" }], details: { truncation: { truncated: true } } } }));
-  expect(failure.summary).toContain("failed"); expect(failure.summary).toContain("Error: command failed");
-  expect(failure.summary).toContain("exit 2"); expect(failure.summary).toContain("TRUNCATED");
+  expect(failure.summary).toBe("$ \\[command unavailable\\]");
+  expect(failure.extended).toContain("Error: command failed");
+  expect(failure.extended).toContain("exit 2"); expect(failure.extended).toContain("TRUNCATED");
   expect(renderTool(event("tool.result", { title: "read", rawOutput: { content: [{ type: "image", data: "binary" }] } })).full).toContain("Image content");
   expect(renderTool(event("tool.call", { title: "bash", rawInput: { command: "echo hi\necho bye" } })).summary.split("\n")).toHaveLength(1);
-  expect(renderTool(event("tool.result", { title: "bash", rawOutput: { structuredContent: { exit_code: 7, output: "out", truncated: true } } })).summary).toContain("exit 7");
+  expect(renderTool(event("tool.result", { title: "bash", rawOutput: { structuredContent: { exit_code: 7, output: "out", truncated: true } } })).extended).toContain("exit 7");
 });
 
 test("real JSONL opt-in presentation and history sidecars preserve envelopes and use current harness/config", async () => {

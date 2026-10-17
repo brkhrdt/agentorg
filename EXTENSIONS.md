@@ -78,7 +78,12 @@ clients receive Markdown and JSON metadata, never callbacks or Pi TUI components
 A harness can customize **any event type** associated with its agents, not just
 calls/results. Tool-specific matches use `data.toolName`, then `data.title`, never
 the broad ACP `kind` (`edit`, `read`, etc.). Adapters should retain exact identity
-and arguments on updates/results too; missing identity safely uses a fallback.
+and arguments on updates/results too. For sparse ACP updates, core recovers
+presentation-only identity/arguments from retained events matching agent,
+generation and toolCallId, without crossing prompt/session boundaries or using
+future records. This also works for paginated history and older adapters. Status
+and output are never inherited. If context has expired, rendering safely falls
+back rather than guessing; stored events and raw mode remain unchanged.
 
 ```ts
 import { renderTool, toolExamples, type EventRenderer } from "agent-organization/plugin";
@@ -110,10 +115,13 @@ Use fenced code/diff blocks for literal content; the public `fenced()` helper
 handles embedded backticks. `renderTool()` supplies portable read/bash/edit/write
 styles and a generic unknown-tool representation. Headers use `$` for bash,
 `<` for read, `>` for write, `Δ` for edit, and `• toolname` for unknown tools.
-Routine phase/status strings and repeated argument JSON are omitted; commands,
-paths/ranges, sizes, line/diff counts and failures remain. The client distinguishes
-call/update/result with local header colors (yellow/orange/green or red), not
-server-generated ANSI. A missing result is not a successful empty result. No filesystem reads
+Routine phase/status strings and repeated argument JSON are omitted. The
+summary/header retains the same command or path across call/update/result:
+only the **symbol** changes lifecycle color (yellow/orange/green or red), not the
+command/filename. Edit summaries additionally show green `+N` and red `-N` line
+counts. Output-dependent sizes, line counts, exit information, truncation and
+failure details belong in extended/full content rather than replacing the tree's
+call identity. Colors are generated locally by the client, never server ANSI. A missing result is not a successful empty result. No filesystem reads
 or native Pi render-component execution is needed to render retained history.
 
 Callbacks must be synchronous, pure, deterministic and bounded (no I/O). Plugins
@@ -127,8 +135,8 @@ For an edit's extended preview, `renderTool()` may return
 `extendedDiff: {prefix, before, after}` alongside its two-line Markdown `extended`
 representation. These are **plain literal strings**, not Markdown or ANSI, each
 capped at 8192 characters and normalized to one logical line. Clients may display
-`prefix` in the lifecycle header color, `before` red, and `after` green on the next
-line, aligned using terminal cells. Older clients simply render `extended`.
+the symbol within `prefix` in its lifecycle color (filename stays plain),
+`before` red, and `after` green on the next line, aligned using terminal cells. Older clients simply render `extended`.
 This is an optional presentation-v1 addition, not a new plugin/capability version.
 Failed edits omit this hint and show their error instead of an apparent applied
 replacement. Multiline/multi-region previews are abbreviated (`↵`, `…`, `∅` for an
@@ -142,7 +150,7 @@ labelled as such. Diff computation is bounded: very large replacements use a
 labelled simplified replacement diff; more than 64 regions are marked incomplete
 with raw fallback. Unchanged distant content and duplicate raw argument dumps
 are not included in normal full output. Clients color fenced `diff` additions and
-removals locally, independently of lifecycle header colors.
+removals locally, independently of the lifecycle symbol color.
 
 Resolution: matching current-agent harness renderer (exact tool matches before
 type-wide matches, then registration order), then the configured server-default

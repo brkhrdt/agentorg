@@ -17,7 +17,14 @@ export class Store {
       CREATE TABLE IF NOT EXISTS agents (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS server_settings (namespace TEXT PRIMARY KEY, data TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY, agent_id TEXT, data TEXT NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY, agent_id TEXT, data TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS events_tool_context ON events (
+        agent_id, json_extract(data, '$.generation'), json_extract(data, '$.data.toolCallId'), seq
+      ) WHERE json_extract(data, '$.type') IN ('tool.call', 'tool.update', 'tool.result')
+        AND (json_extract(data, '$.type')='tool.call' OR json_type(data, '$.data.title')='text'
+          OR json_type(data, '$.data.toolName')='text' OR json_type(data, '$.data.rawInput') NOT IN ('null'));
+      CREATE INDEX IF NOT EXISTS events_tool_boundary ON events (agent_id, seq)
+        WHERE json_extract(data, '$.type') IN ('prompt.started', 'agent.session_replaced');`);
     const version = this.db
       .query<{ value: number }, []>("SELECT value FROM meta WHERE key='schema'")
       .get()!.value;
@@ -80,6 +87,57 @@ export class Store {
         []
       >("SELECT value FROM meta WHERE key='sequence'")
       .get()!.value;
+  }
+  /** Recover presentation-only call identity/arguments for sparse ACP updates and retained history.
+   * Never merge status/output, cross generations/prompts, or write into the raw event. */
+  presentationEvent(event: ServerEvent): ServerEvent {
+    if (!["tool.update", "tool.result"].includes(event.type) || !event.agentId) return event;
+    const object = (value: unknown): Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+    const current = object(event.data);
+    if (typeof current.toolCallId !== "string") return event;
+    // A complete adapter-supplied context is authoritative and needs no history lookup.
+    const identified = [current.toolName, current.title].some(value => typeof value === "string" && value.length > 0);
+    if (identified && current.rawInput != null) return event;
+    const boundary = this.db.query<{ seq: number | null }, [string, number]>(`
+      SELECT MAX(seq) AS seq FROM events WHERE agent_id=? AND seq<?
+      AND json_extract(data, '$.type') IN ('prompt.started', 'agent.session_replaced')
+    `).get(event.agentId, event.seq)?.seq ?? 0;
+    const prior = this.db.query<{ seq: number; type: string; context: string }, [string, string | null, string, number, number]>(`
+      SELECT seq, json_extract(data, '$.type') AS type,
+        json_object('title', json_extract(data, '$.data.title'), 'toolName', json_extract(data, '$.data.toolName'),
+          'kind', json_extract(data, '$.data.kind'), 'rawInput', json_extract(data, '$.data.rawInput')) AS context
+      FROM events WHERE agent_id=? AND json_extract(data, '$.generation') IS ?
+        AND json_extract(data, '$.data.toolCallId')=? AND seq>? AND seq<?
+        AND json_extract(data, '$.type') IN ('tool.call', 'tool.update', 'tool.result')
+        AND (json_extract(data, '$.type')='tool.call' OR json_type(data, '$.data.title')='text'
+          OR json_type(data, '$.data.toolName')='text' OR json_type(data, '$.data.rawInput') NOT IN ('null'))
+      ORDER BY seq DESC LIMIT 1
+    `);
+    const context: Record<string, unknown> = {};
+    let cursor = event.seq;
+    for (;;) {
+      const row = prior.get(event.agentId, event.generation ?? null, current.toolCallId, boundary, cursor);
+      if (!row) break;
+      cursor = row.seq;
+      const previous = JSON.parse(row.context) as Record<string, unknown>;
+      for (const key of ["title", "toolName", "kind"]) {
+        if (!context[key] && typeof previous[key] === "string" && previous[key]) context[key] = previous[key];
+      }
+      if (previous.rawInput != null) {
+        context.rawInput = context.rawInput == null ? previous.rawInput :
+          typeof context.rawInput === "object" && !Array.isArray(context.rawInput) && typeof previous.rawInput === "object" && !Array.isArray(previous.rawInput) ?
+            { ...object(previous.rawInput), ...object(context.rawInput) } : context.rawInput;
+      }
+      if (row.type === "tool.call" || ((context.toolName || context.title) && context.rawInput != null)) break;
+    }
+    if (!Object.keys(context).length) return event;
+    const data = { ...current };
+    for (const [key, value] of Object.entries(context)) {
+      if (data[key] == null || data[key] === "") data[key] = value;
+      else if (key === "rawInput" && typeof data[key] === "object" && !Array.isArray(data[key]) && typeof value === "object" && !Array.isArray(value))
+        data[key] = { ...object(value), ...object(data[key]) };
+    }
+    return { ...event, data };
   }
   history(
     after: number,

@@ -253,7 +253,10 @@ export class Organization implements PluginHost {
   registerRenderer(renderer: EventRenderer) { this.renderers.register(renderer); }
   renderEvent(event: ServerEvent) {
     const harness = event.agentId ? this.agents.get(event.agentId)?.settings.harness : undefined;
-    return this.renderers.render(event, harness, String(this.serverSettings("rendering").defaultToolRenderer));
+    let presentation = event;
+    try { presentation = this.store.presentationEvent(event); }
+    catch { /* Missing/unreadable context must not interrupt raw event delivery. */ }
+    return this.renderers.render(presentation, harness, String(this.serverSettings("rendering").defaultToolRenderer));
   }
   registerEndpoint(
     name: string,

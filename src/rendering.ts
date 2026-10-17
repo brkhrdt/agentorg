@@ -84,7 +84,7 @@ export function renderTool(event: Readonly<ServerEvent>, specialized = true): Re
   const tool = toolIdentity(event) ?? "Tool", details = record(result.details), structured = record(result.structuredContent);
   const hasOutput = data.rawOutput != null || data.content != null;
   const output = data.rawOutput != null ? outputText(data.rawOutput) : data.content != null ? outputText(data.content) : "";
-  const exit = structured.exit_code ?? details.exitCode ?? result.exitCode ?? output.match(/exit (?:code|status):?\s*(\d+)/i)?.[1];
+  const exit = structured.exit_code ?? details.exitCode ?? result.exitCode ?? output.match(/\bexit(?:ed)?(?: with)? (?:code|status):?\s*(-?\d+)/i)?.[1];
   const failed = ["failed", "cancelled", "canceled"].includes(data.status) || result.isError === true || (tool === "bash" && exit !== undefined && Number(exit) !== 0);
   const path = typeof (input.path ?? input.file_path) === "string" ? String(input.path ?? input.file_path) : "[path unavailable]";
   const known = ["read", "bash", "edit", "write"].includes(tool), styled = specialized && known;
@@ -125,7 +125,9 @@ export function renderTool(event: Readonly<ServerEvent>, specialized = true): Re
   const incomplete = data.truncated === true || result.truncated === true || details.truncation?.truncated === true || structured.truncated === true || diff?.incomplete;
   if (incomplete) detail += `${detail ? " · " : ""}[TRUNCATED]`;
   if (failed) detail = `${oneLine(output).slice(0, 200) || (data.status === "cancelled" || data.status === "canceled" ? "cancelled" : "Tool failed")}${detail ? ` · ${detail}` : ""}`;
-  const summary = `${literal(oneLine(subject))}${detail ? ` · ${literal(oneLine(detail))}` : ""}`;
+  // The tree identifies one call throughout its lifecycle: keep the command/path stable.
+  // Edit counts are semantic diff facts, not phase/status text.
+  const summary = `${literal(oneLine(subject))}${diff ? ` · +${diff.after.length} / -${diff.before.length}` : ""}`;
   const extraInput = Object.fromEntries(Object.entries(input).filter(([key]) => !consumed.has(key)));
   if (data.rawInput === undefined) sections.unshift("Arguments unavailable");
   else if (!styled || typeof data.rawInput === "string" || Array.isArray(data.rawInput) || Object.keys(extraInput).length || (typeof data.rawInput !== "object" || data.rawInput === null))
@@ -148,10 +150,12 @@ export function renderTool(event: Readonly<ServerEvent>, specialized = true): Re
     };
     extendedDiff = { prefix: `${oneLine(subject)}${diff.regions > 1 ? ` (${diff.regions} regions)` : ""}${incomplete ? " [TRUNCATED]" : ""}`, before: compact(diff.before), after: compact(diff.after) };
     extended = `${literal(extendedDiff.prefix)} ${literal(extendedDiff.before)}\n  ${literal(extendedDiff.after)}`;
-  } else if (output && !routineOutput) {
-    extended += `\n${literal(oneLine(output).slice(0, 240))}`;
-  } else if (!hasOutput && event.type !== "tool.call" && !diff && !(tool === "write" && data.status === "completed")) extended += "\nOutput unavailable";
-  return { summary, extended, full: [summary, ...sections].join("\n\n"), ...(extendedDiff && { extendedDiff }) };
+  } else {
+    const preview = [detail, output && !routineOutput && !failed ? oneLine(output).slice(0, 240) : ""].filter(Boolean).join(" · ");
+    if (preview) extended += `\n${literal(oneLine(preview))}`;
+    else if (!hasOutput && event.type !== "tool.call" && !diff && !(tool === "write" && data.status === "completed")) extended += "\nOutput unavailable";
+  }
+  return { summary, extended, full: [summary, ...(detail ? [literal(oneLine(detail))] : []), ...sections].join("\n\n"), ...(extendedDiff && { extendedDiff }) };
 }
 export function toolExamples(tool: string): EventRenderer["examples"] {
   const inputs: Record<string, unknown> = {
