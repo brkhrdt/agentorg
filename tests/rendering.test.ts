@@ -51,7 +51,7 @@ test("accidental async renderers are rejected safely and source text stays liter
   await Bun.sleep(0); // A rejected async callback must not become an unhandled rejection.
   const output = renderTool(event("tool.call", { title: "read", rawInput: { path: "a*[file]`name`.ts" } }));
   expect(output.summary).toContain("a\\*\\[file\\]");
-  expect(output.full).toContain('a*[file]`name`.ts');
+  expect(output.full).toContain('a\\*\\[file\\]\\`name\\`.ts');
 });
 
 test("generated catalog is public JSON only, detached, with four levels and untouched synthetic raw", () => {
@@ -79,12 +79,19 @@ for (const tool of ["read", "bash", "edit", "write"]) {
       const rendered = registry.render(e, undefined, "core.tools")!;
       expect(rendered.summary.split("\n")).toHaveLength(1);
       expect(rendered.extended.split("\n").length).toBeLessThanOrEqual(2);
-      expect(rendered.full).toContain("Input:");
+      expect(rendered.full).not.toContain("rawInput");
+      const symbols: Record<string, string> = { read: "\\<", bash: "$", edit: "Δ", write: "\\>" };
+      expect(rendered.summary).toStartWith(symbols[tool]! + " ");
+      expect(rendered.summary).not.toMatch(/ · (pending|in_progress|completed|call|partial|result)\b/);
       if (tool !== "bash") expect(rendered.summary).toContain(tool === "write" ? "hello.txt" : "src/main.ts");
       if (tool === "bash") expect(rendered.summary).toContain("$ printf");
-      if (example.type === "tool.update") expect(rendered.summary).toContain("partial");
+      if (tool === "edit") {
+        expect(rendered.extendedDiff).toMatchObject({ prefix: "Δ src/main.ts", before: "const n = 1;", after: "const n = 2;" });
+        expect(rendered.extended.split("\n")).toHaveLength(2);
+        expect(rendered.full).toContain("```diff");
+        expect(rendered.full).not.toContain('"oldText"');
+      }
       if (example.type === "tool.result") {
-        expect(rendered.summary).toContain("completed");
         if (tool === "edit") { expect(rendered.summary).toContain("+1 / -1"); expect(rendered.full).toContain("```diff"); }
         if (tool === "read") { expect(rendered.summary).toContain("2 lines"); expect(rendered.summary).toContain("offset=10, limit=2"); }
         if (tool === "write") expect(rendered.summary).toContain("11 bytes");

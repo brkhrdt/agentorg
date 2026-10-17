@@ -1,8 +1,11 @@
 import { z } from "zod";
+import { editDiff } from "./tool-diff.ts";
 import type { ServerEvent } from "./types.ts";
 import type { ServerSettingsDefinition } from "./server-settings.ts";
 
-export interface RenderLevels { summary: string; extended: string; full: string }
+/** Optional semantic spans for an edit's two-line preview; clients choose all colors. */
+export interface ExtendedDiff { prefix: string; before: string; after: string }
+export interface RenderLevels { summary: string; extended: string; full: string; extendedDiff?: ExtendedDiff }
 /** Pure, synchronous, server-side Markdown formatter. Never return ANSI/terminal commands. */
 export interface EventRenderer {
   id: string;
@@ -17,10 +20,12 @@ export interface EventRenderer {
 export interface EventRendering extends RenderLevels { rendererId: string; subtype?: string }
 export interface RendererMetadata {
   id: string; name: string; eventTypes: string[]; tool?: string; harness?: string;
-  examples: Array<{ type: string; summary: string; extended: string; full: string; raw: string }>;
+  examples: Array<RenderLevels & { type: string; raw: string }>;
 }
 const renderingSettingsSchema = z.object({ defaultToolRenderer: z.string().min(1).max(128) }).strict();
-const levelsSchema = z.object({ summary: z.string(), extended: z.string(), full: z.string() });
+const levelsSchema = z.object({ summary: z.string(), extended: z.string(), full: z.string(), extendedDiff: z.object({
+  prefix: z.string().max(8192), before: z.string().max(8192), after: z.string().max(8192),
+}).optional() });
 const descriptorSchema = z.object({
   id: z.string().regex(/^[a-z][a-z0-9.-]*$/).max(128), name: z.string().min(1).max(128),
   eventTypes: z.array(z.string().min(1).max(128)).min(1).max(64), tool: z.string().min(1).max(128).optional(),
@@ -60,7 +65,9 @@ function normalized(value: unknown): RenderLevels {
   const levels = levelsSchema.parse(value);
   // Bound expansion by a trusted callback too; raw events are never shortened here.
   const bound = (text: string, max = 2 * 1024 * 1024) => Buffer.byteLength(text) <= max ? text : Buffer.from(text).subarray(0, max).toString("utf8") + " [RENDERING TRUNCATED; see raw event]";
-  return { summary: lineCap(bound(levels.summary, 8192), 1) || "—", extended: lineCap(bound(levels.extended, 16384), 2), full: bound(levels.full) };
+  return { summary: lineCap(bound(levels.summary, 8192), 1) || "—", extended: lineCap(bound(levels.extended, 16384), 2), full: bound(levels.full),
+    ...(levels.extendedDiff && { extendedDiff: { prefix: oneLine(levels.extendedDiff.prefix), before: oneLine(levels.extendedDiff.before), after: oneLine(levels.extendedDiff.after) } }),
+  };
 }
 function invoke(renderer: EventRenderer, event: ServerEvent): RenderLevels {
   const result = renderer.render(structuredClone(event));
@@ -74,61 +81,77 @@ function invoke(renderer: EventRenderer, event: ServerEvent): RenderLevels {
 /** Portable Pi/ACP-style tool formatting, shared by the core default and harness adapters. */
 export function renderTool(event: Readonly<ServerEvent>, specialized = true): RenderLevels {
   const data = record(event.data), input = record(data.rawInput), result = record(data.rawOutput);
-  const tool = toolIdentity(event) ?? "Tool";
-  const phase = event.type === "tool.call" ? "call" : event.type === "tool.update" ? "partial" : "result";
-  const status = String(data.status ?? (phase === "result" ? "unknown" : "pending"));
+  const tool = toolIdentity(event) ?? "Tool", details = record(result.details), structured = record(result.structuredContent);
   const hasOutput = data.rawOutput != null || data.content != null;
   const output = data.rawOutput != null ? outputText(data.rawOutput) : data.content != null ? outputText(data.content) : "";
-  const details = record(result.details), structured = record(result.structuredContent);
+  const exit = structured.exit_code ?? details.exitCode ?? result.exitCode ?? output.match(/exit (?:code|status):?\s*(\d+)/i)?.[1];
+  const failed = ["failed", "cancelled", "canceled"].includes(data.status) || result.isError === true || (tool === "bash" && exit !== undefined && Number(exit) !== 0);
   const path = typeof (input.path ?? input.file_path) === "string" ? String(input.path ?? input.file_path) : "[path unavailable]";
-  let subject = tool, detail = "";
-  const sections: string[] = [];
-  if (specialized && ["read", "edit", "write"].includes(tool)) subject = `${tool} ${path}`;
-  if (specialized && tool === "read") {
+  const known = ["read", "bash", "edit", "write"].includes(tool), styled = specialized && known;
+  let subject = !known ? `• ${tool}` : tool === "bash" ? `$ ${typeof input.command === "string" ? input.command : "[command unavailable]"}` : `${tool === "read" ? "<" : tool === "write" ? ">" : "Δ"} ${path}`;
+  let detail = "";
+  const sections: string[] = [], consumed = new Set<string>();
+  const diff = styled && tool === "edit" ? editDiff(input, details) : undefined;
+  if (!known && data.rawInput !== undefined) {
+    const hint = typeof data.rawInput === "string" ? data.rawInput : Object.keys(input).length ? pretty(input) : "";
+    if (hint) subject += ` ${oneLine(hint).slice(0, 160)}`;
+  }
+  if (styled && tool !== "bash") {
+    subject = `${tool === "read" ? "<" : tool === "write" ? ">" : "Δ"} ${path}`;
+    consumed.add("path"); consumed.add("file_path");
+  }
+  if (styled && tool === "read") {
     if (input.offset != null || input.limit != null) subject += ` (offset=${input.offset ?? 1}${input.limit != null ? `, limit=${input.limit}` : ""})`;
+    consumed.add("offset"); consumed.add("limit");
     if (output) detail = `${output.split("\n").length} lines`;
-    if (Array.isArray(result.content) && result.content.some((part: unknown) => record(part).type === "image")) detail = "Image loaded";
-  } else if (specialized && tool === "bash") {
+    if (Array.isArray(result.content) && result.content.some((part: unknown) => record(part).type === "image")) detail = "image";
+  } else if (styled && tool === "bash") {
     subject = `$ ${typeof input.command === "string" ? input.command : "[command unavailable]"}`;
     if (input.timeout != null) subject += ` (timeout ${input.timeout}s)`;
-    const exit = structured.exit_code ?? details.exitCode ?? result.exitCode ?? output.match(/exit (?:code|status):?\s*(\d+)/i)?.[1];
-    if (exit !== undefined) detail = `exit ${exit}`;
+    consumed.add("command"); consumed.add("timeout");
+    if (exit !== undefined && Number(exit) !== 0) detail = `exit ${exit}`;
     if (output) detail += `${detail ? " · " : ""}${output.split("\n").length} lines`;
-  } else if (specialized && tool === "edit") {
-    const diff = typeof details.patch === "string" ? details.patch : typeof details.diff === "string" ? details.diff : undefined;
-    if (diff) {
-      const lines = diff.split("\n");
-      detail = `+${lines.filter(line => line.startsWith("+") && !line.startsWith("+++")).length} / -${lines.filter(line => line.startsWith("-") && !line.startsWith("---")).length}`;
-      sections.push(`Diff:\n${fenced(diff, "diff")}`);
-    } else {
-      const edits = Array.isArray(input.edits) ? input.edits : typeof input.oldText === "string" ? [input] : [];
-      if (edits.length) sections.push(`Replacements:\n${edits.map((edit: unknown) => {
-        const e = record(edit);
-        return `Before:\n${fenced(typeof e.oldText === "string" ? e.oldText : "[unavailable]")}\nAfter:\n${fenced(typeof e.newText === "string" ? e.newText : "[unavailable]")}`;
-      }).join("\n\n")}`);
-    }
-  } else if (specialized && tool === "write" && typeof input.content === "string") {
+    if (typeof input.command === "string" && /[\r\n]/.test(input.command)) sections.push(fenced(input.command, "sh"));
+  } else if (diff) {
+    detail = `+${diff.after.length} / -${diff.before.length}`;
+    if (diff.regions > 1) detail += ` · ${diff.regions} regions`;
+    const title = failed ? "Changes (tool failed; may be incomplete)" : event.type === "tool.result" && data.status === "completed" ? "Diff" : "Proposed changes";
+    sections.push(`${title}${diff.relative ? " · replacement-relative line numbers" : ""}:\n${fenced(diff.text, "diff")}`);
+    if (!diff.incomplete) { consumed.add("edits"); consumed.add("oldText"); consumed.add("newText"); }
+  } else if (styled && tool === "write" && typeof input.content === "string") {
     detail = `${input.content.split("\n").length} lines · ${Buffer.byteLength(input.content)} bytes`;
-    sections.push(`Content:\n${fenced(input.content)}`);
+    sections.push(fenced(input.content)); consumed.add("content");
   }
-  const incomplete = data.truncated === true || result.truncated === true || details.truncation?.truncated === true || structured.truncated === true;
+  const incomplete = data.truncated === true || result.truncated === true || details.truncation?.truncated === true || structured.truncated === true || diff?.incomplete;
   if (incomplete) detail += `${detail ? " · " : ""}[TRUNCATED]`;
-  if (status === "failed" || result.isError === true) detail = `${oneLine(output).slice(0, 200) || "Tool failed"}${detail ? ` · ${detail}` : ""}`;
-  const summary = `${literal(oneLine(subject))} · ${phase} · ${literal(oneLine(status))}${detail ? ` · ${literal(oneLine(detail))}` : ""}`;
-  const preview = detail || (output ? oneLine(output).slice(0, 200) : phase === "call" ? "Awaiting result" : hasOutput ? "No output" : "Output unavailable");
-  // Preserve unknown argument fields; the write content itself is already a literal block.
-  const { content: _writtenContent, ...writeArguments } = input;
-  const fullInput = specialized && tool === "write" && typeof input.content === "string" ? writeArguments : data.rawInput;
-  sections.unshift(data.rawInput === undefined ? "Arguments unavailable" : `Input:\n${fenced(typeof fullInput === "string" ? fullInput : pretty(fullInput), "json")}`);
-  if (output) sections.push(`Output:\n${fenced(output)}`);
-  else if (phase !== "call") sections.push(hasOutput ? "No output" : "Output unavailable");
+  if (failed) detail = `${oneLine(output).slice(0, 200) || (data.status === "cancelled" || data.status === "canceled" ? "cancelled" : "Tool failed")}${detail ? ` · ${detail}` : ""}`;
+  const summary = `${literal(oneLine(subject))}${detail ? ` · ${literal(oneLine(detail))}` : ""}`;
+  const extraInput = Object.fromEntries(Object.entries(input).filter(([key]) => !consumed.has(key)));
+  if (data.rawInput === undefined) sections.unshift("Arguments unavailable");
+  else if (!styled || typeof data.rawInput === "string" || Array.isArray(data.rawInput) || Object.keys(extraInput).length || (typeof data.rawInput !== "object" || data.rawInput === null))
+    sections.unshift(`Input:\n${fenced(typeof data.rawInput === "string" ? data.rawInput : pretty(styled && Object.keys(input).length ? extraInput : data.rawInput), "json")}`);
+  const routineOutput = !failed && styled && (tool === "edit" || tool === "write") && /^(?:Done|Applied|Written|Successfully (?:replaced|wrote|written))\b/i.test(output);
+  if (output && !routineOutput) sections.push(fenced(output));
+  else if (!hasOutput && event.type !== "tool.call" && !diff && !(tool === "write" && data.status === "completed")) sections.push("Output unavailable");
   if (data.truncated === true) sections.push(outputText(data));
-  const { diff: _diff, patch: _patch, ...otherDetails } = details;
-  const remaining = specialized && tool === "edit" ? otherDetails : details;
+  const { diff: _diff, patch: _patch, firstChangedLine: _line, exitCode: _exit, ...otherDetails } = details;
+  const remaining = styled && tool === "edit" && diff ? otherDetails : details;
   if (Object.keys(remaining).length) sections.push(`Details:\n${fenced(pretty(remaining), "json")}`);
-  const { content: _content, details: _details, ...otherResult } = result;
+  const { content: _content, details: _details, isError: _error, ...otherResult } = result;
   if (Object.keys(otherResult).length) sections.push(`Result metadata:\n${fenced(pretty(otherResult), "json")}`);
-  return { summary, extended: `${literal(oneLine(subject))} · ${phase} · ${literal(oneLine(status))}\n${literal(preview)}`, full: [summary, ...sections].join("\n\n") };
+  let extended = summary;
+  let extendedDiff: ExtendedDiff | undefined;
+  if (diff && !failed && (diff.before.length || diff.after.length)) {
+    const compact = (text: string[]) => {
+      const joined = text.length ? text.map(line => oneLine(line) || "(blank)").join(" ↵ ") : "∅";
+      return joined.length > 240 ? joined.slice(0, 239) + "…" : joined;
+    };
+    extendedDiff = { prefix: `${oneLine(subject)}${diff.regions > 1 ? ` (${diff.regions} regions)` : ""}${incomplete ? " [TRUNCATED]" : ""}`, before: compact(diff.before), after: compact(diff.after) };
+    extended = `${literal(extendedDiff.prefix)} ${literal(extendedDiff.before)}\n  ${literal(extendedDiff.after)}`;
+  } else if (output && !routineOutput) {
+    extended += `\n${literal(oneLine(output).slice(0, 240))}`;
+  } else if (!hasOutput && event.type !== "tool.call" && !diff && !(tool === "write" && data.status === "completed")) extended += "\nOutput unavailable";
+  return { summary, extended, full: [summary, ...sections].join("\n\n"), ...(extendedDiff && { extendedDiff }) };
 }
 export function toolExamples(tool: string): EventRenderer["examples"] {
   const inputs: Record<string, unknown> = {

@@ -5,7 +5,7 @@ import type { ServerSettingsDefinition } from "./server-settings.ts";
 export type { ServerSettingsDefinition, ServerSettingsDescriptor, ServerSettingsField, ServerSettingsView, SettingsEffect } from "./server-settings.ts";
 
 import type { EventRenderer } from "./rendering.ts";
-export type { EventRenderer, RenderLevels, EventRendering, RendererMetadata } from "./rendering.ts";
+export type { EventRenderer, RenderLevels, ExtendedDiff, EventRendering, RendererMetadata } from "./rendering.ts";
 export { renderTool, toolExamples, fenced } from "./rendering.ts";
 
 export const PLUGIN_API_VERSION = 1 as const;

@@ -96,7 +96,8 @@ host.registerHarness({ name: "my-harness", renderers: [readRenderer], launch });
 host.registerRenderer({ ...readRenderer, id: "my-plugin.read" });
 ```
 
-A callback receives a detached event and returns `{summary, extended, full}`:
+A callback receives a detached event and returns `{summary, extended, full}`
+(with optional additive `extendedDiff` semantic spans):
 
 - `summary`: exactly one nonempty logical line; used in the tree regardless of chat level.
 - `extended`: at most two logical lines. Clients may wrap these onto more screen rows.
@@ -107,8 +108,12 @@ Return Markdown without ANSI escapes, terminal commands, HTML-dependent styling,
 or client-specific markup. Clients own sanitization, colors, wrapping and clipping.
 Use fenced code/diff blocks for literal content; the public `fenced()` helper
 handles embedded backticks. `renderTool()` supplies portable read/bash/edit/write
-styles and a generic unknown-tool representation. Call/update/result phases are
-separate; a missing result is not a successful empty result. No filesystem reads
+styles and a generic unknown-tool representation. Headers use `$` for bash,
+`<` for read, `>` for write, `Δ` for edit, and `• toolname` for unknown tools.
+Routine phase/status strings and repeated argument JSON are omitted; commands,
+paths/ranges, sizes, line/diff counts and failures remain. The client distinguishes
+call/update/result with local header colors (yellow/orange/green or red), not
+server-generated ANSI. A missing result is not a successful empty result. No filesystem reads
 or native Pi render-component execution is needed to render retained history.
 
 Callbacks must be synchronous, pure, deterministic and bounded (no I/O). Plugins
@@ -117,6 +122,27 @@ outputs fall through to the next tier without breaking delivery. Core enforces
 the logical line caps, marks truncation, substitutes `—` for an empty summary,
 and bounds summary/extended/full text to 8 KiB/16 KiB/2 MiB respectively. This
 presentation bounding never changes a retained/raw event.
+
+For an edit's extended preview, `renderTool()` may return
+`extendedDiff: {prefix, before, after}` alongside its two-line Markdown `extended`
+representation. These are **plain literal strings**, not Markdown or ANSI, each
+capped at 8192 characters and normalized to one logical line. Clients may display
+`prefix` in the lifecycle header color, `before` red, and `after` green on the next
+line, aligned using terminal cells. Older clients simply render `extended`.
+This is an optional presentation-v1 addition, not a new plugin/capability version.
+Failed edits omit this hint and show their error instead of an apparent applied
+replacement. Multiline/multi-region previews are abbreviated (`↵`, `…`, `∅` for an
+empty side); full retains the diff and raw always retains the source data.
+
+Full edit output prefers the actual result's `details.patch`/`details.diff`.
+Before a result exists, it computes a context diff from retained
+`edits[].oldText/newText` (or legacy `oldText/newText`), **without filesystem I/O**.
+Generated hunk line numbers are relative to the supplied replacement, explicitly
+labelled as such. Diff computation is bounded: very large replacements use a
+labelled simplified replacement diff; more than 64 regions are marked incomplete
+with raw fallback. Unchanged distant content and duplicate raw argument dumps
+are not included in normal full output. Clients color fenced `diff` additions and
+removals locally, independently of lifecycle header colors.
 
 Resolution: matching current-agent harness renderer (exact tool matches before
 type-wide matches, then registration order), then the configured server-default
@@ -139,7 +165,7 @@ Client transport is opt-in and additive:
 - Non-agent snapshots advertise `capabilities.rendering = {version: 1, catalog: "events.renderers"}`.
 - `events.renderers {}` returns `{version: 1, renderers: [...]}` (client-only).
 - `subscribe {renderings: true}` sends a separate
-  `{kind: "presentation", seq, rendering: {rendererId, subtype?, summary, extended, full}}`
+  `{kind: "presentation", seq, rendering: {rendererId, subtype?, summary, extended, full, extendedDiff?}}`
   **before** its unchanged event frame. Filters apply to both; agent subscriptions
   never receive presentation frames.
 - `events.history {after, limit, agentId?, renderings: true}` adds a `renderings`
