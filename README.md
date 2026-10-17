@@ -204,7 +204,7 @@ Load Podman after other launch-transforming plugins. Images contain the harness 
 
 ### Synthetic harness benchmark (separate repository)
 
-[`@agentorg/plugin-harness-bench`](../agentorg-plugin-harness-bench/README.md) provides a fake ACP harness and unattended experiment runner. It grows a real agent tree over MCP up to configured server capacity, then repeats seeded thought/text/tool activity through normal ACP and SQLite persistence. Runs retain data for resume, collect raw-client/latency/resource metrics, and allow the TUI to attach. No model credentials or automatic server-limit changes are required; larger limits are explicit startup configuration. See its README for workload controls, recovery, and measurement caveats.
+[`@agentorg/plugin-harness-bench`](../agentorg-plugin-harness-bench/README.md) provides a fake ACP harness and unattended experiment runner. It grows a real agent tree over MCP up to configured server capacity, then repeats seeded thought/text/tool activity through normal ACP and SQLite persistence. Runs retain data for resume, collect raw-client/latency/resource metrics, and allow the TUI to attach. No model credentials or automatic server-limit changes are required; larger limits are explicit startup configuration. Optional MCP leaf replacement exercises row creation/removal under activity, with a headless TUI tree-render probe. See its README for workload controls and [reproducible SQLite recovery measurements](../agentorg-plugin-harness-bench/RECOVERY.md), including fresh-process versus OS-cache-cold caveats.
 
 ## Server-wide settings
 
