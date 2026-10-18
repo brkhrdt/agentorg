@@ -151,7 +151,7 @@ registration), but must not grant access or auto-retry on uncertain outcomes.
 No credentials should appear in options, labels or setup parameters.
 
 For structured record lists, declare `itemFields` (one level of ordinary fields),
-complete `itemDefaults`, and optional `itemIdKey`/`itemLabelKey`. `itemDefaultsFrom`
+`itemDefaults` for required fields, and optional `itemIdKey`/`itemLabelKey`. `itemDefaultsFrom`
 maps entry field names to sibling public setting keys, allowing forms to seed
 from the current server draft. Clients offer add/edit/delete, stage an entry,
 stage the list, then confirm the revision-fenced server save. `object-map` fields
@@ -168,7 +168,15 @@ secret mask; credentials remain forbidden. Deprecating a field must not erase it
 persisted values or implicitly convert metadata/policy into grants. Fields may provide a
 label, description, number bounds, and effect. Namespace/field counts and labels
 are bounded, keys are top-level (not dotted paths), and duplicate/unknown fields
-and sensitive descriptors are rejected. Defaults must be complete and normalized.
+and sensitive descriptors are rejected. Defaults must be normalized and contain all required fields.
+
+`optional: true` permits an absent field, in defaults and normalized values, as well
+as in record-list forms. Absence means inherit the plugin/runtime default; it is
+not the same as an explicit empty string/list. Forms show inherited fields and
+reset them to absence when their defaults omit the key. At the top level,
+`reset: [key]` removes the override; inside a record form it omits the property
+from the staged record. Plugins still own validation and inheritance semantics.
+`null` is not an inheritance marker and does not bypass editor type validation.
 
 `validate` is a **pure, synchronous, deterministic** complete-object validator;
 it may return normalized public JSON. It is used for registration, reads, and

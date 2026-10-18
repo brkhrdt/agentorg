@@ -10,6 +10,8 @@ export interface ServerSettingsField {
   description?: string;
   /** Public compatibility field; omit from normal editing, never a secret mask. */
   deprecated?: boolean;
+  /** Missing values inherit the plugin/runtime default; forms can reset to absence. */
+  optional?: boolean;
   editor: "text" | "number" | "boolean" | "select" | "list" | "string-map" | "object-map";
   effect: SettingsEffect;
   choices?: string[];
@@ -66,7 +68,7 @@ export interface ServerSettingsView extends ServerSettingsDescriptor {
 }
 const key = z.string().regex(/^[A-Za-z_][A-Za-z0-9_-]*$/).max(128).refine(v => !["__proto__", "constructor", "prototype"].includes(v));
 const basicFieldSchema = z.object({
-  key, label: z.string().min(1).max(128), description: z.string().max(4096).optional(), deprecated: z.boolean().optional(),
+  key, label: z.string().min(1).max(128), description: z.string().max(4096).optional(), deprecated: z.boolean().optional(), optional: z.boolean().optional(),
   editor: z.enum(["text", "number", "boolean", "select", "list", "string-map", "object-map"]),
   effect: z.enum(["immediate", "future-launch", "restart"]),
   choices: z.array(z.string()).min(1).max(1000).optional(), min: z.number().finite().optional(), max: z.number().finite().optional(),
@@ -135,6 +137,7 @@ export class ServerSettingsRegistry {
     z.record(key, z.json()).parse(normalized);
     for (const field of definition.fields) {
       const v = normalized[field.key];
+      if (v === undefined && field.optional) continue;
       const valid = field.editor === "number" ? typeof v === "number" && Number.isFinite(v) && (field.min === undefined || v >= field.min) && (field.max === undefined || v <= field.max) :
         field.editor === "boolean" ? typeof v === "boolean" : field.editor === "select" ? typeof v === "string" && !!field.choices?.includes(v) :
         field.editor === "text" ? typeof v === "string" : field.editor === "list" ? Array.isArray(v) :
@@ -170,7 +173,10 @@ export class ServerSettingsRegistry {
     if (isDeepStrictEqual(overrides, g.record.overrides)) return { view: this.get(p.namespace) };
     const record = { ...g.record, revision: g.record.revision + 1, overrides };
     const effective = { ...g.effective };
-    for (const field of g.descriptor.fields) if (field.effect !== "restart") effective[field.key] = values[field.key];
+    for (const field of g.descriptor.fields) if (field.effect !== "restart") {
+      if (Object.hasOwn(values, field.key)) effective[field.key] = values[field.key];
+      else delete effective[field.key];
+    }
     if (!isDeepStrictEqual(this.validate(g.definition, effective), effective)) throw new ApiError("INVALID_PARAMS", "Pending restart would leave inconsistent effective settings");
     const changedKeys = g.descriptor.fields.filter(f => !isDeepStrictEqual(overrides[f.key], g.record.overrides[f.key]) || Object.hasOwn(overrides, f.key) !== Object.hasOwn(g.record.overrides, f.key)).map(f => f.key);
     const restartRequired = g.descriptor.fields.filter(f => f.effect === "restart" && !isDeepStrictEqual(values[f.key], effective[f.key])).map(f => f.key);
