@@ -111,6 +111,32 @@ export class Store {
       return true;
     })();
   }
+  /** Persist the continuation and dispatch marker in one transaction (safe to retry). */
+  dispatchCompletion(op: Operation, batch: CompletionBatch): boolean {
+    const key = [batch.identity.parentAgentId, batch.identity.parentSessionId, batch.identity.rootOperationId];
+    return this.db.transaction(() => {
+      const row = this.db.query<{ data: string }, typeof key>("SELECT data FROM completion_batches WHERE parent_agent_id=? AND parent_session_id=? AND root_operation_id=?").get(...key);
+      if (!row) return false;
+      const current = JSON.parse(row.data) as CompletionBatch;
+      if (current.state !== "ready") return current.continuationOperationId === op.id;
+      this.saveOperation(op);
+      batch.state = "dispatching";
+      batch.continuationOperationId = op.id;
+      this.setCompletionBatch(batch);
+      return true;
+    })();
+  }
+  /** Atomically persist terminal continuation state and release its member pins. */
+  finishCompletion(op: Operation, batch: CompletionBatch): boolean {
+    const key = [batch.identity.parentAgentId, batch.identity.parentSessionId, batch.identity.rootOperationId];
+    return this.db.transaction(() => {
+      this.saveOperation(op);
+      batch.state = "dispatched";
+      this.setCompletionBatch(batch);
+      this.db.query("DELETE FROM result_pins WHERE operation_id IN (SELECT operation_id FROM completion_members WHERE parent_agent_id=? AND parent_session_id=? AND root_operation_id=?)").run(...key);
+      return true;
+    })();
+  }
   completionBatches(): CompletionBatch[] {
     return this.db.query<{ data: string }, []>("SELECT data FROM completion_batches ORDER BY rowid").all().map(row => JSON.parse(row.data));
   }
@@ -120,6 +146,16 @@ export class Store {
     const batch = JSON.parse(row.data) as CompletionBatch;
     batch.memberStatuses = { ...batch.memberStatuses, [operationId]: status };
     this.setCompletionBatch(batch);
+  }
+  suppressCompletion(batch: CompletionBatch, reason: string) {
+    const key = [batch.identity.parentAgentId, batch.identity.parentSessionId, batch.identity.rootOperationId];
+    this.db.transaction(() => {
+      batch.state = "dispatched";
+      batch.dispatchSuppressed = true;
+      batch.suppressionReason = reason;
+      this.setCompletionBatch(batch);
+      this.db.query("DELETE FROM result_pins WHERE operation_id IN (SELECT operation_id FROM completion_members WHERE parent_agent_id=? AND parent_session_id=? AND root_operation_id=?)").run(...key);
+    })();
   }
   setCompletionBatch(batch: CompletionBatch) {
     const { parentAgentId, parentSessionId, rootOperationId } = batch.identity;

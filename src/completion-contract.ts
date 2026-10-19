@@ -30,6 +30,7 @@ export interface CompletionBatch {
   memberStatuses?: Record<string, import("./types.ts").Operation["status"]>;
   continuationOperationId?: string;
   dispatchSuppressed?: boolean;
+  suppressionReason?: string;
 }
 
 export type CompletionBatchAction = "member-added" | "became-ready" | "readiness-revoked" | "dispatch-started" | "dispatch-finished" | "invalidated";

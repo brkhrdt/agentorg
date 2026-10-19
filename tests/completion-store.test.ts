@@ -72,6 +72,33 @@ test("ready membership addition revokes readiness atomically; dispatching exclud
   } finally { reopened.close(); }
 }));
 
+test("dispatch continuation and terminal result/pin release are atomic across rollback and reopen", () => fixture((store, file) => {
+  expect(store.admitCompletionOperation(op("member"), identity, [], 2)).toBe(true);
+  const batch = store.completionBatches()[0]; batch.state = "ready"; store.setCompletionBatch(batch);
+  const continuation = op("continuation");
+  store.db.exec("CREATE TRIGGER fail_dispatch BEFORE INSERT ON operations WHEN NEW.id='continuation' BEGIN SELECT RAISE(ABORT, 'rollback dispatch'); END");
+  expect(() => store.dispatchCompletion(continuation, batch)).toThrow();
+  expect(store.completionBatches()[0].state).toBe("ready");
+  expect(store.operations().map(o => o.id)).toEqual(["member"]);
+  store.db.exec("DROP TRIGGER fail_dispatch");
+  expect(store.dispatchCompletion(continuation, batch)).toBe(true);
+  expect(store.completionBatches()[0]).toMatchObject({ state: "dispatching", continuationOperationId: "continuation" });
+  store.close();
+  const reopened = new Store(file);
+  try {
+    const persisted = reopened.completionBatches()[0];
+    const done = { ...continuation, status: "completed" as const, completedAt: "now", result: "done" };
+    reopened.db.exec("CREATE TRIGGER fail_finish BEFORE DELETE ON result_pins BEGIN SELECT RAISE(ABORT, 'rollback finish'); END");
+    expect(() => reopened.finishCompletion(done, persisted)).toThrow();
+    expect(reopened.operations().find(o => o.id === "continuation")?.status).toBe("queued");
+    expect(reopened.pinnedOperationIds()).toEqual(["member"]);
+    reopened.db.exec("DROP TRIGGER fail_finish");
+    expect(reopened.finishCompletion(done, persisted)).toBe(true);
+    expect(reopened.completionBatches()[0].state).toBe("dispatched");
+    expect(reopened.pinnedOperationIds()).toEqual([]);
+  } finally { reopened.close(); }
+}));
+
 test("retains bounded terminal result shapes at maxOperations one without copying bodies to ledger", () => fixture(store => {
   const cases: Operation[] = [
     { ...op("absent", "completed"), result: undefined },
