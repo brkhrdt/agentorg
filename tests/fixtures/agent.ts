@@ -1,5 +1,7 @@
 import * as acp from "@agentclientprotocol/sdk";
 import { Readable, Writable } from "node:stream";
+import { existsSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { OrganizationClient } from "../../src/client.ts";
 import type { AgentRecord, Operation } from "../../src/types.ts";
 
@@ -25,6 +27,14 @@ acp
     const text = ctx.params.prompt
       .map((b) => (b.type === "text" ? b.text : ""))
       .join("");
+    if (text.startsWith("Review child completion batch ") && process.env.COMPLETION_BARRIER_DIR) {
+      const batchId = text.match(/Review child completion batch ([^\\.\\n]+)/)?.[1];
+      if (batchId) {
+        writeFileSync(join(process.env.COMPLETION_BARRIER_DIR, `continuation-${batchId}.started`), "started");
+        while (!existsSync(join(process.env.COMPLETION_BARRIER_DIR, `continuation-${batchId}.release`))) await delay(10);
+        if (process.env.COMPLETION_FAIL === "1") throw new Error("fixture continuation failure");
+      }
+    }
     if (text === "crash") process.exit(2);
     if (text === "permission") {
       const result = await ctx.client.request("session/request_permission", {

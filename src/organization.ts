@@ -419,10 +419,13 @@ export class Organization implements PluginHost {
       for (const id of this.store.pruneTerminalOperations(this.limits.maxOperations)) this.operations.delete(id);
       this.emit("completion.dispatch_finished", { batchId: batch.identity.rootOperationId, status }, batch.identity.parentAgentId);
     } else {
+      // Persist terminal operation and (when enrolled) membership status atomically first.
+      // A failed write leaves the live operation running so the terminal transition can retry.
+      this.store.finishOperation(completed);
       Object.assign(op, completed);
-      this.saveOp(op);
+      this.emit("operation.changed", op, op.agentId ?? undefined);
+      for (const id of this.store.pruneTerminalOperations(this.limits.maxOperations)) this.operations.delete(id);
     }
-    this.store.updateCompletionMemberStatus(op.id, status);
   }
   private newOp(
     type: string,
@@ -1099,7 +1102,7 @@ export class Organization implements PluginHost {
           : ({ batchId: p.batchId, state: batch.dispatchSuppressed ? "suppressed" : batch.state, ...(batch.dispatchSuppressed ? { suppressionReason: batch.suppressionReason } : {}), total: batch.memberOperationIds.length, after: start, next, items: list });
         for (let index = start; index < Math.min(batch.memberOperationIds.length, start + p.limit); index++) {
           const operationId = batch.memberOperationIds[index], op = this.operations.get(operationId);
-          const item = { index, operationId, targetAgentId: op?.agentId ?? null, status: op?.status ?? batch.memberStatuses?.[operationId] ?? "missing-or-pruned", resultAvailable: !!op };
+          const item = { index, operationId, targetAgentId: op?.agentId ?? null, status: op?.status ?? "missing-or-pruned", resultAvailable: !!op };
           const candidate = [...items, item], next = index + 1 < batch.memberOperationIds.length ? index + 1 : null;
           if (Buffer.byteLength(JSON.stringify(make(candidate, next))) > this.limits.maxResponseBytes) break;
           items.push(item);
@@ -1677,7 +1680,7 @@ export class Organization implements PluginHost {
     add(
       "completion_get",
       "completion.get",
-      "Inspect your own parent-completion batch metadata (paginated JSONL); fetch full child results separately with operation_get.",
+      "Inspect your own parent-completion batch metadata as a compact JSON object (b,s,t,a,n,i; items x,o,g,s,r) or expanded JSON object, paged with batchId/after/limit. Item r/resultAvailable indicates whether the original operation result is still retained; missing member status means pruned/retention-expired. Unknown or expired batches return NOT_FOUND. Fetch retained full child results separately with operation_get.",
       { batchId: id, after: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: 100 } },
       ["batchId"],
     );

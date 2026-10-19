@@ -74,6 +74,19 @@ export class Store {
       .query("INSERT OR REPLACE INTO operations VALUES (?, ?)")
       .run(op.id, JSON.stringify(op));
   }
+  /** Commit terminal state and completion membership together before mutating live operations. */
+  finishOperation(op: Operation): boolean {
+    return this.db.transaction(() => {
+      this.saveOperation(op);
+      const row = this.db.query<{ data: string }, [string]>("SELECT data FROM completion_batches WHERE EXISTS (SELECT 1 FROM completion_members WHERE completion_members.parent_agent_id=completion_batches.parent_agent_id AND completion_members.parent_session_id=completion_batches.parent_session_id AND completion_members.root_operation_id=completion_batches.root_operation_id AND completion_members.operation_id=?)").get(op.id);
+      if (row) {
+        const batch = JSON.parse(row.data) as CompletionBatch;
+        batch.memberStatuses = { ...batch.memberStatuses, [op.id]: op.status };
+        this.setCompletionBatch(batch);
+      }
+      return true;
+    })();
+  }
   deleteOperation(id: string) {
     this.db.query("DELETE FROM operations WHERE id=?").run(id);
   }

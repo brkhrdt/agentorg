@@ -1,5 +1,5 @@
 import { test, expect, afterEach } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createConnection } from "node:net";
@@ -313,18 +313,135 @@ test("root coordinates two children through organization tools without holding l
   expect(Object.values(batch?.memberStatuses ?? {})).toEqual(["completed", "completed"]);
 });
 
-test("fire-and-return ACP dispatch completes the parent before its continuation and retains child results", async () => {
-  const { client, server } = await setup({ maxPrompts: 1, maxOperations: 1 });
+test("fire-and-return continuation preserves authenticated child results under pruning pressure until terminal", async () => {
+  const { client, server, dir } = await setup({ maxPrompts: 1, maxOperations: 1 });
+  const root = await create(client, null, { COMPLETION_BARRIER_DIR: dir });
+  const parent = await client.wait(await prompt(client, root.id, "delegate-return"));
+  expect(parent.status).toBe("completed");
+  const batchForParent = () => server.organization.store.completionBatches().find(b => b.identity.rootOperationId === parent.id)!;
+  await until(() => batchForParent()?.state === "dispatching");
+  const batch = batchForParent();
+  expect(batch.memberOperationIds).toHaveLength(2);
+  expect(batch.continuationOperationId).toBeTruthy();
+  await until(() => existsSync(join(dir, `continuation-${parent.id}.started`)));
+  const rt = (server.organization as any).runtimes.get(root.id);
+  const authenticated = await OrganizationClient.connect(join(dir, "server.sock"), rt.token);
+  clients.push(authenticated);
+  const results = [];
+  for (const id of batch.memberOperationIds) {
+    const op = await authenticated.request<Operation>("operation.get", { operationId: id });
+    expect(op.status).toBe("completed");
+    expect(op.result).toBeDefined();
+    results.push(op.result);
+  }
+  expect(results.map((result: any) => result.text)).toEqual(["done:code done", "done:tests done"]);
+  // Retention pressure cannot evict completion members while the continuation is running.
+  const extra: Operation = { id: crypto.randomUUID(), type: "fixture", agentId: null, input: {}, caller: { kind: "server", id: "test" }, status: "completed", createdAt: now(), completedAt: now() };
+  server.organization.store.saveOperation(extra);
+  server.organization.operations.set(extra.id, extra);
+  server.organization.store.pruneTerminalOperations(1);
+  expect(batch.memberOperationIds.every(id => server.organization.store.operations().some(op => op.id === id))).toBe(true);
+  expect(server.organization.store.pinnedOperationIds().sort()).toEqual([...batch.memberOperationIds].sort());
+  const continuation = await client.request<Operation>("operation.get", { operationId: batch.continuationOperationId! });
+  expect(continuation.status).toBe("running");
+  expect(batchForParent().state).toBe("dispatching");
+  await Bun.write(join(dir, `continuation-${parent.id}.release`), "release");
+  await until(() => batchForParent().state === "dispatched");
+  expect(server.organization.operations.get(batch.continuationOperationId!)?.status).toBe("completed");
+  expect(server.organization.store.pinnedOperationIds()).toHaveLength(0);
+  expect(server.organization.store.history(0, 10000).events.filter(e => e.type === "completion.dispatch_started" && (e.data as any).batchId === parent.id)).toHaveLength(1);
+  await Bun.sleep(30);
+  expect(server.organization.store.history(0, 10000).events.filter(e => e.type === "completion.dispatch_started" && (e.data as any).batchId === parent.id)).toHaveLength(1);
+});
+
+test("completion dispatch does not preempt competing parent work and restores maxPrompts capacity", async () => {
+  const { client, server } = await setup({ maxPrompts: 1 });
+  const root = await create(client);
+  const parent = await prompt(client, root.id, "delegate-return");
+  const competing = await prompt(client, root.id, "sleep:1500", true);
+  await client.wait(parent);
+  await until(() => server.organization.operations.get(competing.id)?.status === "running");
+  const batch = () => server.organization.store.completionBatches().find(item => item.identity.rootOperationId === parent.id)!;
+  await until(() => batch()?.state === "collecting");
+  expect(batch().continuationOperationId).toBeUndefined();
+  expect(server.organization.operations.get(competing.id)?.status).toBe("running");
+  await client.wait(competing);
+  await until(() => batch().state === "dispatched");
+  expect(server.organization.operations.get(batch().continuationOperationId!)?.status).toBe("completed");
+});
+
+test("continuation failure and cancellation both terminalize dispatch and release pins", async () => {
+  for (const outcome of ["cancel", "fail"] as const) {
+    const { client, server, dir } = await setup();
+    const root = await create(client, null, { COMPLETION_BARRIER_DIR: dir, ...(outcome === "fail" ? { COMPLETION_FAIL: "1" } : {}) });
+    const parent = await client.wait(await prompt(client, root.id, "delegate-return"));
+    const findBatch = () => server.organization.store.completionBatches().find(batch => batch.identity.rootOperationId === parent.id)!;
+    await until(() => findBatch()?.state === "dispatching");
+    const continuationId = findBatch().continuationOperationId!;
+    await until(() => existsSync(join(dir, `continuation-${parent.id}.started`)));
+    if (outcome === "cancel") {
+      await client.request("operation.cancel", { operationId: continuationId });
+      await until(() => server.organization.operations.get(continuationId)?.status === "stopped");
+      await Bun.write(join(dir, `continuation-${parent.id}.release`), "release");
+    } else {
+      await Bun.write(join(dir, `continuation-${parent.id}.release`), "release");
+      await until(() => server.organization.operations.get(continuationId)?.status === "failed");
+    }
+    await until(() => findBatch().state === "dispatched");
+    expect(server.organization.store.pinnedOperationIds()).toHaveLength(0);
+    expect(findBatch().state).toBe("dispatched");
+  }
+});
+
+test("completion metadata pages retain stable order, compact/expanded shapes, and recipient fencing", async () => {
+  const { client, server } = await setup({ maxResponseBytes: 256 });
+  const root = await create(client), child = await create(client, root.id), sibling = await create(client, root.id);
+  const parent = await prompt(client, root.id, "sleep:300");
+  await until(() => server.organization.operations.get(parent.id)?.status === "running");
+  const identity = { parentAgentId: root.id, parentSessionId: root.sessionId!, rootOperationId: parent.id };
+  const ids = [0, 1, 2].map(() => crypto.randomUUID());
+  for (const id of ids) {
+    const op: Operation = { id, type: "agent.prompt", agentId: child.id, input: {}, caller: { kind: "server", id: "test" }, status: "completed", createdAt: now(), completedAt: now(), result: { value: id } };
+    expect(server.organization.store.admitCompletionOperation(op, identity, [child.id], 10)).toBe(true);
+    server.organization.operations.set(id, op);
+  }
+  const rt = (server.organization as any).runtimes.get(root.id);
+  const auth = { sessionId: root.sessionId!, generation: rt.generation };
+  const get = (caller: any, agentAuth: any, after = 0) => server.organization.request("completion.get", { batchId: parent.id, after, limit: 1 }, caller, agentAuth) as Promise<any>;
+  const page1 = await get({ kind: "agent", id: root.id }, auth);
+  expect(page1).toHaveProperty("b", parent.id);
+  expect(page1.i[0]).toMatchObject({ x: 0, o: ids[0], g: child.id, r: true });
+  expect(Buffer.byteLength(JSON.stringify(page1))).toBeLessThanOrEqual(256);
+  const page2 = await get({ kind: "agent", id: root.id }, auth, page1.n);
+  const page3 = await get({ kind: "agent", id: root.id }, auth, page2.n);
+  expect([page1.i[0].o, page2.i[0].o, page3.i[0].o]).toEqual(ids);
+  expect(page3.n).toBeNull();
+  await expect(get({ kind: "agent", id: sibling.id }, { sessionId: sibling.sessionId!, generation: (server.organization as any).runtimes.get(sibling.id).generation })).rejects.toMatchObject({ code: "FORBIDDEN" });
+  await expect(get({ kind: "agent", id: root.id }, { ...auth, generation: "stale" })).rejects.toMatchObject({ code: "FORBIDDEN" });
+  // The batch remains available, while a pruned original member is explicitly unavailable.
+  server.organization.operations.delete(ids[1]);
+  server.organization.store.deleteOperation(ids[1]);
+  const missing = await get({ kind: "agent", id: root.id }, auth, 1);
+  expect(missing.i[0]).toMatchObject({ o: ids[1], s: "missing-or-pruned", r: false });
+  await expect(server.organization.request("completion.get", { batchId: "unknown", after: 0, limit: 1 })).rejects.toMatchObject({ code: "NOT_FOUND" });
+  // At the normal budget the same endpoint returns the expanded, still-JSON object shape.
+  (server.organization as any).limits.maxResponseBytes = 4096;
+  const expanded = await get({ kind: "agent", id: root.id }, auth);
+  expect(expanded).toHaveProperty("batchId", parent.id);
+  expect(expanded.items[0]).toMatchObject({ operationId: ids[0], resultAvailable: true });
+  await client.wait(parent);
+});
+
+test("tiny prompt budget suppresses completion once and releases all member pins", async () => {
+  const { client, server } = await setup({ maxPromptBytes: 128 });
   const root = await create(client);
   const parent = await client.wait(await prompt(client, root.id, "delegate-return"));
   expect(parent.status).toBe("completed");
-  await until(() => server.organization.store.completionBatches().find(b => b.identity.rootOperationId === parent.id)?.state === "dispatched");
-  const batch = server.organization.store.completionBatches().find(b => b.identity.rootOperationId === parent.id)!;
-  expect(batch.memberOperationIds).toHaveLength(2);
-  expect(batch.state).toBe("dispatched");
-  expect(batch.continuationOperationId).toBeTruthy();
-  expect(server.organization.operations.get(batch.continuationOperationId!)?.status).toBe("completed");
-  expect(server.organization.store.db.query("SELECT operation_id FROM result_pins").all()).toHaveLength(0);
+  await until(() => server.organization.store.completionBatches().find(batch => batch.identity.rootOperationId === parent.id)?.dispatchSuppressed === true);
+  const batch = server.organization.store.completionBatches().find(batch => batch.identity.rootOperationId === parent.id)!;
+  expect(batch.suppressionReason).toBe("prompt-budget");
+  expect(server.organization.store.pinnedOperationIds()).toHaveLength(0);
+  expect(server.organization.store.history(0, 10000).events.filter(event => event.type === "completion.dispatch_suppressed" && (event.data as any).batchId === parent.id)).toHaveLength(1);
 });
 
 test("authenticated descendant prompts enroll durable server provenance, including nested targets", async () => {
@@ -434,6 +551,29 @@ test("enrolled members record failed, cancelled, superseded, and stopped termina
   for (const [op, status] of [[failed, "failed"], [cancelled, "stopped"], [superseded, "stopped"], [stopped, "stopped"]] as const)
     expect(batch.memberStatuses?.[op.id]).toBe(status);
   await client.wait(parent);
+});
+
+test("enrolled child terminal persistence failure leaves live and durable state retryable", async () => {
+  const { client, server } = await setup();
+  const root = await create(client), child = await create(client, root.id);
+  const parent = await prompt(client, root.id, "sleep:1000");
+  await until(() => server.organization.operations.get(parent.id)?.status === "running");
+  const member = await server.organization.request("agent.prompt", { agentId: child.id, text: "sleep:500" }, { kind: "agent", id: root.id }) as Operation;
+  await until(() => server.organization.operations.get(member.id)?.status === "running");
+  const batch = server.organization.store.completionBatches().find(b => b.identity.rootOperationId === parent.id)!;
+  server.organization.store.db.exec(`CREATE TRIGGER fail_member_terminal BEFORE INSERT ON operations WHEN NEW.id='${member.id}' AND json_extract(NEW.data, '$.status')='completed' BEGIN SELECT RAISE(ABORT, 'injected terminal persistence failure'); END`);
+  expect(() => (server.organization as any).finish(server.organization.operations.get(member.id), "completed", { result: "durable" })).toThrow("injected terminal persistence failure");
+  expect(server.organization.operations.get(member.id)?.status).toBe("running");
+  expect(server.organization.store.operations().find(op => op.id === member.id)?.status).toBe("running");
+  expect(batch.memberStatuses?.[member.id]).toBe("queued");
+  expect(server.organization.store.pinnedOperationIds()).toContain(member.id);
+  server.organization.store.db.exec("DROP TRIGGER fail_member_terminal");
+  (server.organization as any).finish(server.organization.operations.get(member.id), "completed", { result: "durable" });
+  expect(server.organization.store.operations().find(op => op.id === member.id)).toMatchObject({ status: "completed", result: { result: "durable" } });
+  expect(server.organization.store.completionBatches().find(b => b.identity.rootOperationId === parent.id)?.memberStatuses?.[member.id]).toBe("completed");
+  expect(server.organization.store.pinnedOperationIds()).toContain(member.id);
+  await client.wait(parent);
+  await client.wait(member);
 });
 
 test("completion storage failure leaves queued and active prompts untouched", async () => {
