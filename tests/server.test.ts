@@ -746,6 +746,10 @@ test("authenticated MCP operation_get resultOnly preserves bounded results and a
   const smallResult = JSON.parse(smallReply.content[0].text);
   expect(smallResult).toMatchObject({ a: true, s: "completed", t: false, r: "r".repeat(180) });
   expect(Buffer.byteLength(JSON.stringify(smallResult))).toBeLessThanOrEqual(256);
+  const stream256 = insert(child.id, { text: "s".repeat(220), truncated: true, stopReason: "response-limit" });
+  const stream256Result = JSON.parse((await call(rootClient, stream256.id)).content[0].text);
+  expect(stream256Result).toMatchObject({ a: true, s: "completed", t: true, r: { truncated: true, stopReason: "response-limit" } });
+  expect(stream256Result.r.text.length).toBeLessThan(220);
   expect((await call(outsiderClient, small.id)).isError).toBe(true);
   const selfOperation = insert(root.id, "must not relax self authorization");
   expect((await call(rootClient, selfOperation.id)).isError).toBe(true);
@@ -759,6 +763,11 @@ test("authenticated MCP operation_get resultOnly preserves bounded results and a
   const storedResult = JSON.parse((await call(rootClient, storedTruncated.id)).content[0].text);
   expect(storedResult).toMatchObject({ a: true, s: "completed", t: true });
   expect(storedResult.r.truncated).toBe(true);
+  (server.organization as any).limits.maxResponseBytes = 1024 * 1024;
+  const defaultCapStream = insert(child.id, { text: "d".repeat(1024 * 1024 + 200), truncated: true, stopReason: "response-limit" });
+  const defaultStreamResult = JSON.parse((await call(rootClient, defaultCapStream.id)).content[0].text);
+  expect(defaultStreamResult).toMatchObject({ a: true, s: "completed", t: true, r: { truncated: true, stopReason: "response-limit" } });
+  expect(defaultStreamResult.r.text.length).toBeLessThan(1024 * 1024 + 200);
 });
 
 test("completion.ready diagnostic failure does not block dispatch or release pins", async () => {

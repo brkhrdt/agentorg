@@ -481,13 +481,33 @@ export class Organization implements PluginHost {
     const available = op.result !== undefined;
     if (!available) return { a: false, s: op.status, t: false };
     const stored = op.result;
-    const isStoredTruncation = stored !== null && typeof stored === "object" && !Array.isArray(stored)
-      && (stored as Record<string, unknown>).truncated === true
-      && typeof (stored as Record<string, unknown>).originalBytes === "number"
-      && typeof (stored as Record<string, unknown>).preview === "string";
+    const record = stored !== null && typeof stored === "object" && !Array.isArray(stored)
+      ? stored as Record<string, unknown>
+      : undefined;
+    const isStreamingResult = typeof record?.text === "string" && typeof record.truncated === "boolean";
+    const isStoredTruncation = record?.truncated === true && (
+      isStreamingResult || (typeof record.originalBytes === "number" && typeof record.preview === "string")
+    );
     const make = (result: unknown, truncated: boolean) => ({ a: true, s: op.status, t: truncated, r: result });
     const full = make(stored, isStoredTruncation);
     if (Buffer.byteLength(JSON.stringify(full)) <= this.limits.maxResponseBytes) return full;
+    if (isStreamingResult) {
+      const stopReason = record.stopReason;
+      const makeStream = (text: string, truncated: boolean) => make({ text, truncated, ...(stopReason === undefined ? {} : { stopReason }) }, true);
+      const originalText = record.text as string;
+      let low = 0, high = originalText.length;
+      while (low < high) {
+        const mid = Math.ceil((low + high) / 2);
+        let text = originalText.slice(0, mid);
+        // Avoid returning a dangling high surrogate when clipping Unicode output.
+        if (text.length && /[\uD800-\uDBFF]$/.test(text)) text = text.slice(0, -1);
+        if (Buffer.byteLength(JSON.stringify(makeStream(text, true))) <= this.limits.maxResponseBytes) low = mid;
+        else high = mid - 1;
+      }
+      let text = originalText.slice(0, low);
+      if (text.length && /[\uD800-\uDBFF]$/.test(text)) text = text.slice(0, -1);
+      return makeStream(text, true);
+    }
     const overhead = Buffer.byteLength(JSON.stringify(make(null, true))) - Buffer.byteLength("null");
     const compactResult = bounded(stored, Math.max(0, this.limits.maxResponseBytes - overhead));
     return make(compactResult, true);
