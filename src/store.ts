@@ -82,14 +82,18 @@ export class Store {
   admitCompletionOperation(op: Operation, identity: CompletionBatchIdentity, relevantRootAgentIds: string[], maxPending: number): boolean {
     if (!Number.isSafeInteger(maxPending) || maxPending < 1) return false;
     return this.db.transaction(() => {
-      const pending = this.db.query<{ count: number }, []>(`
-        SELECT COUNT(*) AS count FROM completion_members m JOIN operations o ON o.id=m.operation_id
-        WHERE json_extract(o.data, '$.status') NOT IN ('completed','failed','stopped')
-      `).get()!.count;
+      // Capacity represents outstanding completion obligations, not merely running work:
+      // a terminal result remains retained and consumes capacity until its pin is released.
+      const pending = this.db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM result_pins").get()!.count;
       if (pending >= maxPending || this.db.query("SELECT 1 FROM operations WHERE id=?").get(op.id)) return false;
       const key = [identity.parentAgentId, identity.parentSessionId, identity.rootOperationId] as const;
       const existing = this.db.query<{ data: string }, typeof key>(`SELECT data FROM completion_batches WHERE parent_agent_id=? AND parent_session_id=? AND root_operation_id=?`).get(...key);
-      if (existing && JSON.parse(existing.data).state !== "collecting") return false;
+      if (existing) {
+        const state = (JSON.parse(existing.data) as CompletionBatch).state;
+        // A member joining a ready batch atomically revokes readiness. Dispatching or
+        // terminal batches cannot accept members.
+        if (state !== "collecting" && state !== "ready") return false;
+      }
       if (!existing) {
         const batch: CompletionBatch = { identity, state: "collecting", memberOperationIds: [], relevantRootAgentIds: [...new Set(relevantRootAgentIds)] };
         this.db.query("INSERT INTO completion_batches VALUES (?, ?, ?, ?)").run(...key, JSON.stringify(batch));
@@ -100,6 +104,7 @@ export class Store {
       const row = this.db.query<{ data: string }, typeof key>("SELECT data FROM completion_batches WHERE parent_agent_id=? AND parent_session_id=? AND root_operation_id=?").get(...key)!;
       const batch = JSON.parse(row.data) as CompletionBatch;
       batch.memberOperationIds.push(op.id);
+      batch.state = "collecting";
       batch.relevantRootAgentIds = [...new Set([...batch.relevantRootAgentIds, ...relevantRootAgentIds])];
       this.db.query("UPDATE completion_batches SET data=? WHERE parent_agent_id=? AND parent_session_id=? AND root_operation_id=?").run(JSON.stringify(batch), ...key);
       return true;
