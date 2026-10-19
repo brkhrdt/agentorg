@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { dirname, resolve, join } from "node:path";
 import { z } from "zod";
-import { Organization } from "./organization.ts";
+import { Organization, type AuthenticatedAgentContext } from "./organization.ts";
 import { JsonLines } from "./jsonl.ts";
 import {
   ApiError,
@@ -213,13 +213,15 @@ export class OrganizationServer {
         const request = requestSchema.parse(raw);
         id = request.id;
         if (!this.ready) throw new ApiError("NOT_READY", "Server is starting");
+        let authenticatedAgent: AuthenticatedAgentContext | undefined;
+        let caller: Caller;
         if (request.token) {
-          eventCaller = this.organization.callerForToken(request.token);
+          const authenticated = this.organization.authenticatedAgentForToken(request.token);
+          caller = authenticated.caller;
+          authenticatedAgent = authenticated.context;
+          eventCaller = caller;
           internal = true;
-        }
-        const caller = request.token
-          ? this.organization.callerForToken(request.token)
-          : eventCaller;
+        } else caller = eventCaller;
         if (internal && !request.token)
           throw new ApiError(
             "FORBIDDEN",
@@ -234,6 +236,7 @@ export class OrganizationServer {
             request.method,
             request.params ?? {},
             caller,
+            authenticatedAgent,
           );
         send({ kind: "response", id, ok: true, result });
       } catch (error) {

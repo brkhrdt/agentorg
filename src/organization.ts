@@ -59,6 +59,10 @@ interface Runtime {
   queue: Operation[];
   active?: ActivePrompt;
 }
+export interface AuthenticatedAgentContext {
+  generation: string;
+  sessionId: string;
+}
 interface Permission {
   agentId: string;
   generation: string;
@@ -455,11 +459,16 @@ export class Organization implements PluginHost {
       this.authorize(caller, op.agentId, true);
     }
   }
-  callerForToken(token: string): Caller {
+  authenticatedAgentForToken(token: string): { caller: Caller; context: AuthenticatedAgentContext } {
     const id = this.tokens.get(token);
-    if (!id || !this.runtimes.has(id))
+    const runtime = id ? this.runtimes.get(id) : undefined;
+    const agent = id ? this.agents.get(id) : undefined;
+    if (!id || !runtime || !agent?.sessionId)
       throw new ApiError("FORBIDDEN", "Expired agent capability");
-    return { kind: "agent", id };
+    return { caller: { kind: "agent", id }, context: { generation: runtime.generation, sessionId: agent.sessionId } };
+  }
+  callerForToken(token: string): Caller {
+    return this.authenticatedAgentForToken(token).caller;
   }
   async initialize(recover = true) {
     await this.serialize(async () => {
@@ -549,6 +558,7 @@ export class Organization implements PluginHost {
     method: string,
     params: unknown = {},
     caller: Caller = { kind: "server", id: "server" },
+    authenticatedAgent?: AuthenticatedAgentContext,
   ): Promise<unknown> {
     if (this.mutationContext.getStore() && /^(agent\.(create|modify|stop|restart|restart_subtree|replace_session|remove|prompt)|operation\.(wait|cancel)|organization\.settings\.update)$/.test(method))
       throw new ApiError("NESTED_MUTATION", "Lifecycle hooks cannot enqueue or wait for mutations");
@@ -901,6 +911,12 @@ export class Organization implements PluginHost {
             throw new ApiError("NOT_RUNNING", "Agent is not available");
           if (p.queue && rt.queue.length >= this.limits.maxQueuedPrompts)
             throw new ApiError("LIMIT", "Prompt queue limit reached");
+          if (caller.kind === "agent" && authenticatedAgent) {
+            const currentRuntime = this.runtimes.get(caller.id);
+            const currentAgent = this.agents.get(caller.id);
+            if (!currentRuntime || !currentAgent || currentRuntime.generation !== authenticatedAgent.generation || currentAgent.sessionId !== authenticatedAgent.sessionId)
+              throw new ApiError("FORBIDDEN", "Expired agent capability");
+          }
           const parentRuntime = caller.kind === "agent" ? this.runtimes.get(caller.id) : undefined;
           const parentAgent = caller.kind === "agent" ? this.agents.get(caller.id) : undefined;
           const parentOperation = parentRuntime?.active?.op;
@@ -1054,7 +1070,7 @@ export class Organization implements PluginHost {
         if (!tool) throw new ApiError("NOT_FOUND", "Unknown MCP tool");
         try {
           const result = bounded(
-            await tool.execute(p.arguments, caller, this),
+            await tool.execute(p.arguments, caller, this, authenticatedAgent),
             this.limits.maxResponseBytes,
           );
           return {
@@ -1432,7 +1448,7 @@ export class Organization implements PluginHost {
           required,
           additionalProperties: false,
         },
-        execute: (args, caller) => this.request(method, args, caller),
+        execute: (args, caller, _api, authenticatedAgent) => this.request(method, args, caller, authenticatedAgent),
       });
     this.registerTool({
       name: "child_create",

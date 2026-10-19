@@ -65,6 +65,7 @@ export interface ToolDefinition {
     args: unknown,
     caller: Extract<Caller, { kind: "agent" }>,
     api: PluginHost,
+    authenticatedAgent?: { generation: string; sessionId: string },
   ): unknown | Promise<unknown>;
 }
 export interface MutationChange {

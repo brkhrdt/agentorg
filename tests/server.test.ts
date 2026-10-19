@@ -333,6 +333,79 @@ test("authenticated descendant prompts enroll durable server provenance, includi
   await client.wait(parent);
 });
 
+test("enrolled members record failed, cancelled, superseded, and stopped terminal outcomes", async () => {
+  const { client, server } = await setup();
+  const root = await create(client);
+  const child = await create(client, root.id);
+  const parent = await prompt(client, root.id, "sleep:3000");
+  await until(() => server.organization.operations.get(parent.id)?.status === "running");
+  const issue = (text: string, queue = false) => server.organization.request("agent.prompt", { agentId: child.id, text, queue }, { kind: "agent", id: root.id }) as Promise<Operation>;
+  const failed = await client.wait(await issue("crash"));
+  expect(failed.status).toBe("failed");
+  await mutate(client, "agent.restart", child.id);
+  const cancelled = await issue("sleep:1000");
+  await until(() => server.organization.operations.get(cancelled.id)?.status === "running");
+  await client.request("operation.cancel", { operationId: cancelled.id });
+  expect((await client.wait(cancelled)).status).toBe("stopped");
+  const active = await issue("sleep:1000");
+  await until(() => server.organization.operations.get(active.id)?.status === "running");
+  const superseded = await issue("sleep:50", true);
+  const replacement = await issue("sleep:20");
+  expect((await client.wait(superseded)).status).toBe("stopped");
+  await client.wait(active);
+  await client.wait(replacement);
+  const stopped = await issue("sleep:1000");
+  await until(() => server.organization.operations.get(stopped.id)?.status === "running");
+  await mutate(client, "agent.stop", child.id);
+  expect((await client.wait(stopped)).status).toBe("stopped");
+  const batch = server.organization.store.completionBatches().find(b => b.identity.rootOperationId === parent.id)!;
+  for (const [op, status] of [[failed, "failed"], [cancelled, "stopped"], [superseded, "stopped"], [stopped, "stopped"]] as const)
+    expect(batch.memberStatuses?.[op.id]).toBe(status);
+  await client.wait(parent);
+});
+
+test("completion storage failure leaves queued and active prompts untouched", async () => {
+  const { client, server } = await setup();
+  const root = await create(client);
+  const child = await create(client, root.id);
+  const parent = await prompt(client, root.id, "sleep:1000");
+  await until(() => server.organization.operations.get(parent.id)?.status === "running");
+  const active = await prompt(client, child.id, "sleep:1000");
+  await until(() => server.organization.operations.get(active.id)?.status === "running");
+  const queued = await prompt(client, child.id, "sleep:10", true);
+  server.organization.store.db.exec(`CREATE TRIGGER reject_completion BEFORE INSERT ON operations WHEN json_extract(NEW.data, '$.promptProvenance.kind')='parent-completion' BEGIN SELECT RAISE(ABORT, 'test storage failure'); END;`);
+  await expect(server.organization.request("agent.prompt", { agentId: child.id, text: "replacement" }, { kind: "agent", id: root.id })).rejects.toThrow();
+  expect(server.organization.operations.get(active.id)?.status).toBe("running");
+  expect(server.organization.operations.get(queued.id)?.status).toBe("queued");
+  expect(server.organization.store.completionBatches()).toHaveLength(0);
+  server.organization.store.db.exec("DROP TRIGGER reject_completion");
+  await client.wait(parent);
+  await client.wait(active);
+});
+
+test("socket prompts authenticated before queued restart reject stale generation without side effects", async () => {
+  const { client, server, dir } = await setup();
+  const root = await create(client);
+  const child = await create(client, root.id);
+  const blocker = await create(client, root.id, { START_DELAY: "350" });
+  const parentWork = await prompt(client, root.id, "sleep:1000");
+  await until(() => server.organization.operations.get(parentWork.id)?.status === "running");
+  const childWork = await prompt(client, child.id, "sleep:1000");
+  await until(() => server.organization.operations.get(childWork.id)?.status === "running");
+  const blockerRestart = await client.request<Operation>("agent.restart", { agentId: blocker.id });
+  await until(() => server.organization.operations.get(blockerRestart.id)?.status === "running");
+  const parentRestart = await client.request<Operation>("agent.restart", { agentId: root.id });
+  const oldToken = (server.organization as any).runtimes.get(root.id).token as string;
+  const agentClient = await OrganizationClient.connect(join(dir, "server.sock"), oldToken);
+  clients.push(agentClient);
+  const stalePrompt = agentClient.request<Operation>("agent.prompt", { agentId: child.id, text: "must not supersede" });
+  await expect(stalePrompt).rejects.toMatchObject({ code: "FORBIDDEN" });
+  await client.wait(parentRestart);
+  expect(server.organization.operations.get(childWork.id)?.status).toBe("running");
+  expect(server.organization.store.completionBatches()).toHaveLength(0);
+  await client.wait(childWork);
+});
+
 test("client prompts are unattributed and completion capacity rejection has no cancellation effects", async () => {
   const { client, server } = await setup({ maxPendingCompletionOperations: 1 });
   const root = await create(client);
