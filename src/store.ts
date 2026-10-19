@@ -74,6 +74,17 @@ export class Store {
       .query("INSERT OR REPLACE INTO operations VALUES (?, ?)")
       .run(op.id, JSON.stringify(op));
   }
+  /** Atomically transition an admitted queued operation to running and prune terminal history. */
+  startOperation(op: Operation, maxOperations: number): string[] {
+    return this.db.transaction(() => {
+      this.saveOperation(op);
+      const pinned = new Set(this.pinnedOperationIds());
+      const terminalRows = this.operations().filter(item => ["completed", "failed", "stopped"].includes(item.status));
+      const remove = terminalRows.filter(item => !pinned.has(item.id)).slice(0, Math.max(0, terminalRows.length - maxOperations));
+      for (const item of remove) this.deleteOperation(item.id);
+      return remove.map(item => item.id);
+    })();
+  }
   /** Commit terminal state and completion membership together before mutating live operations. */
   finishOperation(op: Operation): boolean {
     return this.db.transaction(() => {

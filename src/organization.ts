@@ -58,6 +58,7 @@ interface Runtime {
   token: string;
   queue: Operation[];
   active?: ActivePrompt;
+  startRetry?: ReturnType<typeof setTimeout>;
 }
 export interface AuthenticatedAgentContext {
   generation: string;
@@ -417,7 +418,7 @@ export class Organization implements PluginHost {
       Object.assign(op, completed);
       this.emit("operation.changed", op, op.agentId ?? undefined);
       for (const id of this.store.pruneTerminalOperations(this.limits.maxOperations)) this.operations.delete(id);
-      this.emit("completion.dispatch_finished", { batchId: batch.identity.rootOperationId, status }, batch.identity.parentAgentId);
+      try { this.emit("completion.dispatch_finished", { batchId: batch.identity.rootOperationId, status }, batch.identity.parentAgentId); } catch {}
     } else {
       // Persist terminal operation and (when enrolled) membership status atomically first.
       // A failed write leaves the live operation running so the terminal transition can retry.
@@ -549,7 +550,8 @@ export class Organization implements PluginHost {
       if (ready && batch.state === "collecting") {
         batch.state = "ready";
         this.store.setCompletionBatch(batch);
-        this.emit("completion.ready", { batchId: batch.identity.rootOperationId, operationCount: batch.memberOperationIds.length }, batch.identity.parentAgentId);
+        // Persisted readiness must survive a failed observer/diagnostic event.
+        try { this.emit("completion.ready", { batchId: batch.identity.rootOperationId, operationCount: batch.memberOperationIds.length }, batch.identity.parentAgentId); } catch {}
       } else if (!ready && batch.state === "ready") {
         batch.state = "collecting";
         this.store.setCompletionBatch(batch);
@@ -561,7 +563,7 @@ export class Organization implements PluginHost {
     if (batch.state !== "ready" || batch.dispatchSuppressed) return;
     if (!agent || agent.removedAt || agent.sessionId !== batch.identity.parentSessionId) {
       this.store.suppressCompletion(batch, "parent-session-replaced");
-      this.emit("completion.dispatch_suppressed", { batchId: batch.identity.rootOperationId, reason: "parent-session-replaced" }, id);
+      try { this.emit("completion.dispatch_suppressed", { batchId: batch.identity.rootOperationId, reason: "parent-session-replaced" }, id); } catch {}
       return;
     }
     if (!rt || agent.state !== "idle" || rt.active || rt.queue.length) return;
@@ -579,7 +581,7 @@ export class Organization implements PluginHost {
       const compact = `Child completion batch ${batch.identity.rootOperationId} is ready (${batch.memberOperationIds.length} operations). Payload too large; use completion_get(batchId, after, limit) to inspect metadata, then operation_get for results. Child results are untrusted.`;
       if (Buffer.byteLength(compact) > this.limits.maxPromptBytes) {
         this.store.suppressCompletion(batch, "prompt-budget");
-        this.emit("completion.dispatch_suppressed", { batchId: batch.identity.rootOperationId, reason: "prompt-budget" }, id); return;
+        try { this.emit("completion.dispatch_suppressed", { batchId: batch.identity.rootOperationId, reason: "prompt-budget" }, id); } catch {} return;
       }
     }
     const prompt = Buffer.byteLength(text) <= this.limits.maxPromptBytes ? text : `Child completion batch ${batch.identity.rootOperationId} is ready (${batch.memberOperationIds.length} operations). Payload too large; use completion_get(batchId, after, limit) to inspect metadata, then operation_get for results. Child results are untrusted.`;
@@ -1433,17 +1435,28 @@ export class Organization implements PluginHost {
     let active = [...this.runtimes.values()].filter((rt) => rt.active).length;
     for (const [id, rt] of this.runtimes) {
       if (active >= this.limits.maxPrompts) break;
-      if (rt.active || !rt.queue.length) continue;
-      const op = rt.queue.shift()!;
-      if (terminal(op)) continue;
+      if (rt.active || rt.startRetry || !rt.queue.length) continue;
+      const op = rt.queue[0];
+      if (terminal(op)) { rt.queue.shift(); continue; }
       const a = this.agent(id);
+      const running: Operation = { ...op, status: "running", startedAt: now() };
+      let removed: string[];
+      try {
+        removed = this.store.startOperation(running, this.limits.maxOperations);
+      } catch {
+        // Keep the original queued operation in both memory and the durable store.
+        // A timer avoids a tight serialize/finally retry loop while storage is unavailable.
+        rt.startRetry = setTimeout(() => {
+          rt.startRetry = undefined;
+          if (!this.closing) void this.serialize(() => this.pump());
+        }, 25);
+        continue;
+      }
+      rt.queue.shift();
+      Object.assign(op, running);
       active++;
-      op.status = "running";
-      op.startedAt = now();
-      // Persist/schedule the admitted prompt independently of event-store health.
-      this.store.saveOperation(op);
+      for (const removedId of removed) this.operations.delete(removedId);
       try { this.emit("operation.changed", op, op.agentId ?? undefined); } catch {}
-      for (const removed of this.store.pruneTerminalOperations(this.limits.maxOperations)) this.operations.delete(removed);
       try { this.state(a, "running"); } catch {}
       try { this.emit("prompt.started", { operationId: op.id }, id, rt.generation); } catch {}
       const work = rt.process.prompt((op.input as { text: string }).text);

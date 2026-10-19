@@ -725,6 +725,45 @@ test("diagnostic event-store failure cannot strand ACP child completion or conti
   expect(server.organization.store.pinnedOperationIds()).toHaveLength(0);
 });
 
+test("completion.ready diagnostic failure does not block dispatch or release pins", async () => {
+  const { client, server } = await setup();
+  const root = await create(client);
+  const emit = server.organization.emit.bind(server.organization);
+  let failed = false;
+  (server.organization as any).emit = (type: string, ...args: any[]) => {
+    if (type === "completion.ready" && !failed) { failed = true; throw new Error("injected ready event failure"); }
+    return (emit as any)(type, ...args);
+  };
+  const parent = await client.wait(await prompt(client, root.id, "delegate-return"));
+  expect(parent.status).toBe("completed");
+  await until(() => server.organization.store.completionBatches().find(batch => batch.identity.rootOperationId === parent.id)?.state === "dispatched");
+  const batch = server.organization.store.completionBatches().find(item => item.identity.rootOperationId === parent.id)!;
+  expect(failed).toBe(true);
+  expect(server.organization.operations.get(batch.continuationOperationId!)?.status).toBe("completed");
+  expect(server.organization.store.pinnedOperationIds()).toHaveLength(0);
+  expect(server.organization.store.history(0, 10000).events.filter(event => event.type === "completion.dispatch_started" && (event.data as any).batchId === parent.id)).toHaveLength(1);
+});
+
+test("continuation start persistence failure retains queue ownership and retries after storage recovers", async () => {
+  const { client, server } = await setup();
+  const root = await create(client);
+  server.organization.store.db.exec(`CREATE TRIGGER reject_continuation_start BEFORE INSERT ON operations WHEN json_extract(NEW.data, '$.caller.id')='server' AND json_extract(NEW.data, '$.input.text') LIKE 'Review child completion batch%' AND json_extract(NEW.data, '$.status')='running' BEGIN SELECT RAISE(ABORT, 'injected start persistence failure'); END`);
+  const parent = await client.wait(await prompt(client, root.id, "delegate-return"));
+  const batchForParent = () => server.organization.store.completionBatches().find(batch => batch.identity.rootOperationId === parent.id)!;
+  await until(() => batchForParent()?.state === "dispatching" && !!(server.organization as any).runtimes.get(root.id)?.startRetry);
+  const continuationId = batchForParent().continuationOperationId!;
+  const rt = (server.organization as any).runtimes.get(root.id);
+  expect(rt.queue.some((operation: Operation) => operation.id === continuationId)).toBe(true);
+  expect(server.organization.operations.get(continuationId)?.status).toBe("queued");
+  expect(server.organization.store.operations().find(operation => operation.id === continuationId)?.status).toBe("queued");
+  server.organization.store.db.exec("DROP TRIGGER reject_continuation_start");
+  await until(() => server.organization.operations.get(continuationId)?.status === "completed");
+  await until(() => batchForParent().state === "dispatched");
+  expect(rt.queue.some((operation: Operation) => operation.id === continuationId)).toBe(false);
+  expect(server.organization.store.pinnedOperationIds()).toHaveLength(0);
+  expect(server.organization.store.history(0, 10000).events.filter(event => event.type === "prompt.started" && (event.data as any).operationId === continuationId)).toHaveLength(1);
+});
+
 test("prompt.finished and continuation operation.changed event failures cannot strand completion work", async () => {
   const { client, server } = await setup();
   const root = await create(client);
