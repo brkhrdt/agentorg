@@ -476,6 +476,22 @@ export class Organization implements PluginHost {
       this.authorize(caller, op.agentId, true);
     }
   }
+  /** Compact result-only projection for callers whose full operation metadata crowds out results. */
+  private operationResultProjection(op: Operation) {
+    const available = op.result !== undefined;
+    if (!available) return { a: false, s: op.status, t: false };
+    const stored = op.result;
+    const isStoredTruncation = stored !== null && typeof stored === "object" && !Array.isArray(stored)
+      && (stored as Record<string, unknown>).truncated === true
+      && typeof (stored as Record<string, unknown>).originalBytes === "number"
+      && typeof (stored as Record<string, unknown>).preview === "string";
+    const make = (result: unknown, truncated: boolean) => ({ a: true, s: op.status, t: truncated, r: result });
+    const full = make(stored, isStoredTruncation);
+    if (Buffer.byteLength(JSON.stringify(full)) <= this.limits.maxResponseBytes) return full;
+    const overhead = Buffer.byteLength(JSON.stringify(make(null, true))) - Buffer.byteLength("null");
+    const compactResult = bounded(stored, Math.max(0, this.limits.maxResponseBytes - overhead));
+    return make(compactResult, true);
+  }
   authenticatedAgentForToken(token: string): { caller: Caller; context: AuthenticatedAgentContext } {
     const id = this.tokens.get(token);
     const runtime = id ? this.runtimes.get(id) : undefined;
@@ -1121,6 +1137,7 @@ export class Organization implements PluginHost {
           .object({
             operationId: z.string(),
             waitMs: z.number().int().nonnegative().optional(),
+            resultOnly: z.boolean().optional(),
           })
           .strict()
           .parse(params);
@@ -1132,6 +1149,7 @@ export class Organization implements PluginHost {
             op,
             Math.min(p.waitMs ?? 1000, this.limits.maxWaitMs),
           );
+        if (method === "operation.get" && p.resultOnly) return this.operationResultProjection(op);
         return structuredClone(op);
       }
       case "operation.cancel": {
@@ -1713,8 +1731,8 @@ export class Organization implements PluginHost {
     add(
       "operation_get",
       "operation.get",
-      "Query an operation in your subtree.",
-      { operationId: id },
+      "Query an operation in your subtree. Set resultOnly=true to retrieve a compact result projection under the same authorization; response keys are a (available), s (status), t (truncated), r (result when available).",
+      { operationId: id, resultOnly: { type: "boolean" } },
       ["operationId"],
     );
     add(

@@ -10,6 +10,7 @@ import { OrganizationClient } from "../src/client.ts";
 import { JsonLines } from "../src/jsonl.ts";
 import { Store } from "../src/store.ts";
 import {
+  bounded,
   now,
   type AgentRecord,
   type Operation,
@@ -723,6 +724,41 @@ test("diagnostic event-store failure cannot strand ACP child completion or conti
   const batch = server.organization.store.completionBatches().find(item => item.identity.rootOperationId === parent.id)!;
   expect(server.organization.operations.get(batch.continuationOperationId!)?.status).toBe("completed");
   expect(server.organization.store.pinnedOperationIds()).toHaveLength(0);
+});
+
+test("authenticated MCP operation_get resultOnly preserves bounded results and authorization", async () => {
+  const { client, server, dir } = await setup();
+  const root = await create(client), child = await create(client, root.id), outsider = await create(client, child.id);
+  const insert = (agentId: string, result: unknown) => {
+    const op: Operation = { id: crypto.randomUUID(), type: "agent.prompt", agentId, input: { noisyMetadata: "x".repeat(300) }, caller: { kind: "server", id: "server" }, status: "completed", createdAt: now(), completedAt: now(), result };
+    server.organization.store.saveOperation(op);
+    server.organization.operations.set(op.id, op);
+    return op;
+  };
+  const small = insert(child.id, "r".repeat(180));
+  (server.organization as any).limits.maxResponseBytes = 256;
+  const tokenFor = (id: string) => (server.organization as any).runtimes.get(id).token as string;
+  const rootClient = await OrganizationClient.connect(join(dir, "server.sock"), tokenFor(root.id));
+  const outsiderClient = await OrganizationClient.connect(join(dir, "server.sock"), tokenFor(outsider.id));
+  clients.push(rootClient, outsiderClient);
+  const call = (agent: OrganizationClient, operationId: string) => agent.request<any>("mcp.call", { name: "operation_get", arguments: { operationId, resultOnly: true } });
+  const smallReply = await call(rootClient, small.id);
+  const smallResult = JSON.parse(smallReply.content[0].text);
+  expect(smallResult).toMatchObject({ a: true, s: "completed", t: false, r: "r".repeat(180) });
+  expect(Buffer.byteLength(JSON.stringify(smallResult))).toBeLessThanOrEqual(256);
+  expect((await call(outsiderClient, small.id)).isError).toBe(true);
+  const selfOperation = insert(root.id, "must not relax self authorization");
+  expect((await call(rootClient, selfOperation.id)).isError).toBe(true);
+  (server.organization as any).limits.maxResponseBytes = 1024;
+  const nearCap = insert(child.id, "z".repeat(990));
+  const nearCapResult = JSON.parse((await call(rootClient, nearCap.id)).content[0].text);
+  expect(nearCapResult.a).toBe(true);
+  expect(nearCapResult.t).toBe(true);
+  expect(nearCapResult.r.truncated).toBe(true);
+  const storedTruncated = insert(child.id, bounded({ text: "stream".repeat(1000) }, 1024));
+  const storedResult = JSON.parse((await call(rootClient, storedTruncated.id)).content[0].text);
+  expect(storedResult).toMatchObject({ a: true, s: "completed", t: true });
+  expect(storedResult.r.truncated).toBe(true);
 });
 
 test("completion.ready diagnostic failure does not block dispatch or release pins", async () => {
