@@ -313,6 +313,20 @@ test("root coordinates two children through organization tools without holding l
   expect(Object.values(batch?.memberStatuses ?? {})).toEqual(["completed", "completed"]);
 });
 
+test("fire-and-return ACP dispatch completes the parent before its continuation and retains child results", async () => {
+  const { client, server } = await setup({ maxPrompts: 1, maxOperations: 1 });
+  const root = await create(client);
+  const parent = await client.wait(await prompt(client, root.id, "delegate-return"));
+  expect(parent.status).toBe("completed");
+  await until(() => server.organization.store.completionBatches().find(b => b.identity.rootOperationId === parent.id)?.state === "dispatched");
+  const batch = server.organization.store.completionBatches().find(b => b.identity.rootOperationId === parent.id)!;
+  expect(batch.memberOperationIds).toHaveLength(2);
+  expect(batch.state).toBe("dispatched");
+  expect(batch.continuationOperationId).toBeTruthy();
+  expect(server.organization.operations.get(batch.continuationOperationId!)?.status).toBe("completed");
+  expect(server.organization.store.db.query("SELECT operation_id FROM result_pins").all()).toHaveLength(0);
+});
+
 test("authenticated descendant prompts enroll durable server provenance, including nested targets", async () => {
   const { client, server } = await setup();
   const root = await create(client);

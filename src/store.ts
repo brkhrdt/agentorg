@@ -118,7 +118,12 @@ export class Store {
       const row = this.db.query<{ data: string }, typeof key>("SELECT data FROM completion_batches WHERE parent_agent_id=? AND parent_session_id=? AND root_operation_id=?").get(...key);
       if (!row) return false;
       const current = JSON.parse(row.data) as CompletionBatch;
-      if (current.state === "dispatching") return current.continuationOperationId === op.id;
+      if (current.state === "dispatching") {
+        const persisted = this.db.query<{ data: string }, [string]>("SELECT data FROM operations WHERE id=?").get(op.id);
+        if (current.continuationOperationId !== op.id || !persisted) return false;
+        const saved = JSON.parse(persisted.data) as Operation;
+        return ["queued", "running"].includes(saved.status) && op.status === saved.status;
+      }
       if (current.state !== "ready" || op.status !== "queued") return false;
       this.saveOperation(op);
       batch.state = "dispatching";

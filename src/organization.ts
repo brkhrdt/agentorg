@@ -1091,7 +1091,12 @@ export class Organization implements PluginHost {
         if (caller.kind === "agent" && caller.id !== batch.identity.parentAgentId) throw new ApiError("FORBIDDEN", "Only the batch recipient may inspect completion metadata");
         const items: Array<{index:number;operationId:string;targetAgentId:string|null;status:string;resultAvailable:boolean}> = [];
         const start = Math.min(p.after, batch.memberOperationIds.length);
-        const make = (list: typeof items, next: number | null) => ({ batchId: p.batchId, state: batch.dispatchSuppressed ? "suppressed" : batch.state, ...(batch.dispatchSuppressed ? { suppressionReason: batch.suppressionReason } : {}), total: batch.memberOperationIds.length, after: start, next, items: list });
+        // At the supported 256-byte cap use the documented compact keys (b/s/t/a/n/i;
+        // item x/o/g/s/r). This keeps one UUID entry representable without ambiguity.
+        const compact = this.limits.maxResponseBytes < 512;
+        const make = (list: typeof items, next: number | null) => compact
+          ? ({ b: p.batchId, s: batch.dispatchSuppressed ? "suppressed" : batch.state, ...(batch.dispatchSuppressed ? { q: batch.suppressionReason } : {}), t: batch.memberOperationIds.length, a: start, n: next, i: list.map(x => ({ x: x.index, o: x.operationId, g: x.targetAgentId, s: x.status, r: x.resultAvailable })) })
+          : ({ batchId: p.batchId, state: batch.dispatchSuppressed ? "suppressed" : batch.state, ...(batch.dispatchSuppressed ? { suppressionReason: batch.suppressionReason } : {}), total: batch.memberOperationIds.length, after: start, next, items: list });
         for (let index = start; index < Math.min(batch.memberOperationIds.length, start + p.limit); index++) {
           const operationId = batch.memberOperationIds[index], op = this.operations.get(operationId);
           const item = { index, operationId, targetAgentId: op?.agentId ?? null, status: op?.status ?? batch.memberStatuses?.[operationId] ?? "missing-or-pruned", resultAvailable: !!op };
@@ -1459,8 +1464,6 @@ export class Organization implements PluginHost {
     error?: unknown,
   ) {
     if (this.runtimes.get(id) !== rt || rt.active?.op.id !== op.id) return;
-    rt.active = undefined;
-    this.cancelPermissions(id);
     if (error)
       this.emit(
         "agent.error",
@@ -1468,16 +1471,24 @@ export class Organization implements PluginHost {
         id,
         rt.generation,
       );
-    this.finish(
-      op,
-      op.cancelRequested || response?.stopReason === "cancelled"
-        ? "stopped"
-        : error
-          ? "failed"
-          : "completed",
-      { ...((op.result as object) ?? {}), stopReason: response?.stopReason },
-      error,
-    );
+    try {
+      this.finish(
+        op,
+        op.cancelRequested || response?.stopReason === "cancelled"
+          ? "stopped"
+          : error
+            ? "failed"
+            : "completed",
+        { ...((op.result as object) ?? {}), stopReason: response?.stopReason },
+        error,
+      );
+    } catch {
+      // ACP calls back once; retain the active reference and retry transient store failures.
+      setTimeout(() => { if (!this.closing) void this.serialize(() => this.completePrompt(id, rt, op, response, error)); }, 25);
+      return;
+    }
+    rt.active = undefined;
+    this.cancelPermissions(id);
     this.emit(
       "prompt.finished",
       { operationId: op.id, status: op.status },

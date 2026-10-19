@@ -51,7 +51,7 @@ acp
       if (cancelled && !process.env.IGNORE_CANCEL) break;
       await delay(10);
     }
-    if (text === "delegate") {
+    if (text === "delegate" || text === "delegate-return") {
       const client = await OrganizationClient.connect(
         process.env.ORG_SOCKET!,
         process.env.ORG_TOKEN!,
@@ -76,17 +76,13 @@ acp
             throw new Error(JSON.stringify(op.error));
           children.push((op.result as AgentRecord).id);
         }
-        await Promise.all(
-          children.map(async (agentId, i) => {
-            const op = await call("descendant_prompt", {
-              agentId,
-              text: i ? "tests done" : "code done",
-            });
-            const done = await client.wait(op);
-            if (done.status !== "completed")
-              throw new Error(JSON.stringify(done.error));
-          }),
-        );
+        const issued = await Promise.all(children.map((agentId, i) => call("descendant_prompt", {
+          agentId, text: i ? "tests done" : "code done",
+        })));
+        if (text === "delegate") await Promise.all(issued.map(async (op: Operation) => {
+          const done = await client.wait(op);
+          if (done.status !== "completed") throw new Error(JSON.stringify(done.error));
+        }));
       } finally {
         client.close();
       }

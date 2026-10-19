@@ -98,6 +98,7 @@ test("dispatch continuation and terminal result/pin release are atomic across ro
     expect(reopened.finishCompletion(done, { ...persisted, continuationOperationId: "wrong" })).toBe(false);
     expect(reopened.finishCompletion(done, persisted)).toBe(true);
     expect(reopened.dispatchCompletion(continuation, persisted)).toBe(false);
+    expect(reopened.dispatchCompletion(done, persisted)).toBe(false); // same ID, but terminal operations are never idempotent dispatches
     expect(reopened.completionBatches()[0].state).toBe("dispatched");
     expect(reopened.pinnedOperationIds()).toEqual([]);
   } finally { reopened.close(); }
