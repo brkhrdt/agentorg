@@ -1467,13 +1467,18 @@ export class Organization implements PluginHost {
     error?: unknown,
   ) {
     if (this.runtimes.get(id) !== rt || rt.active?.op.id !== op.id) return;
-    if (error)
-      this.emit(
-        "agent.error",
-        { operationId: op.id, ...errorShape(error) },
-        id,
-        rt.generation,
-      );
+    // Diagnostics are best-effort: a failed event write must never strand the ACP
+    // completion callback before its retry-protected durable terminal transition.
+    if (error) {
+      try {
+        this.emit(
+          "agent.error",
+          { operationId: op.id, ...errorShape(error) },
+          id,
+          rt.generation,
+        );
+      } catch {}
+    }
     try {
       this.finish(
         op,

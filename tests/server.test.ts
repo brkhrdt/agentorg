@@ -314,7 +314,7 @@ test("root coordinates two children through organization tools without holding l
 });
 
 test("fire-and-return continuation preserves authenticated child results under pruning pressure until terminal", async () => {
-  const { client, server, dir } = await setup({ maxPrompts: 1, maxOperations: 1 });
+  const { client, server, dir } = await setup({ maxPrompts: 1, maxOperations: 1, maxPendingCompletionOperations: 2 });
   const root = await create(client, null, { COMPLETION_BARRIER_DIR: dir });
   const parent = await client.wait(await prompt(client, root.id, "delegate-return"));
   expect(parent.status).toBe("completed");
@@ -344,14 +344,72 @@ test("fire-and-return continuation preserves authenticated child results under p
   expect(server.organization.store.pinnedOperationIds().sort()).toEqual([...batch.memberOperationIds].sort());
   const continuation = await client.request<Operation>("operation.get", { operationId: batch.continuationOperationId! });
   expect(continuation.status).toBe("running");
+  const generated = (continuation.input as any).text as string;
+  const payload = JSON.parse(generated.slice(generated.indexOf("\n") + 1));
+  expect(payload.notification).toContain("Child work has settled");
+  expect(payload.outcomes).toHaveLength(2);
+  expect(payload.outcomes.map((item: any) => item.status)).toEqual(["completed", "completed"]);
+  expect(payload.outcomes.every((item: any) => item.resultAvailable && item.previewUntrusted === true && item.preview.text.startsWith("done:"))).toBe(true);
+  expect(payload.warning).toContain("untrusted");
+  expect(payload.warning).toContain("operation_get");
   expect(batchForParent().state).toBe("dispatching");
   await Bun.write(join(dir, `continuation-${parent.id}.release`), "release");
   await until(() => batchForParent().state === "dispatched");
   expect(server.organization.operations.get(batch.continuationOperationId!)?.status).toBe("completed");
   expect(server.organization.store.pinnedOperationIds()).toHaveLength(0);
+  const capacityProbe: Operation = { id: crypto.randomUUID(), type: "agent.prompt", agentId: root.id, input: {}, caller: { kind: "server", id: "capacity-probe" }, status: "completed", createdAt: now(), completedAt: now() };
+  expect(server.organization.store.admitCompletionOperation(capacityProbe, { parentAgentId: root.id, parentSessionId: root.sessionId!, rootOperationId: crypto.randomUUID() }, [root.id], 2)).toBe(true);
   expect(server.organization.store.history(0, 10000).events.filter(e => e.type === "completion.dispatch_started" && (e.data as any).batchId === parent.id)).toHaveLength(1);
   await Bun.sleep(30);
   expect(server.organization.store.history(0, 10000).events.filter(e => e.type === "completion.dispatch_started" && (e.data as any).batchId === parent.id)).toHaveLength(1);
+});
+
+test("generated completion payload preserves previews, outcome states, and untrusted warnings", async () => {
+  const { client, server, dir } = await setup();
+  const root = await create(client), child = await create(client, root.id), batchId = crypto.randomUUID();
+  const identity = { parentAgentId: root.id, parentSessionId: root.sessionId!, rootOperationId: batchId };
+  const specs = [
+    { status: "completed" as const, result: undefined },
+    { status: "completed" as const, result: { text: "partial result" } },
+    { status: "failed" as const, error: { code: "FIXTURE", message: "failed result" } },
+    { status: "stopped" as const },
+    { status: "completed" as const, result: "large".repeat(300) },
+  ];
+  const ids: string[] = [];
+  for (const spec of specs) {
+    const op: Operation = { id: crypto.randomUUID(), type: "agent.prompt", agentId: child.id, input: {}, caller: { kind: "server", id: "fixture" }, status: spec.status, createdAt: now(), completedAt: now(), result: spec.result, ...(spec.error ? { error: spec.error } : {}) };
+    expect(server.organization.store.admitCompletionOperation(op, identity, [child.id], 20)).toBe(true);
+    server.organization.operations.set(op.id, op); ids.push(op.id);
+  }
+  // Model the original result aging out independently of the retained batch ledger.
+  server.organization.operations.delete(ids[0]);
+  server.organization.store.deleteOperation(ids[0]);
+  const batch = server.organization.store.completionBatches().find(item => item.identity.rootOperationId === batchId)!;
+  batch.state = "ready";
+  server.organization.store.setCompletionBatch(batch);
+  (server.organization as any).dispatchCompletionBatch(batch);
+  const continuation = await client.wait(server.organization.operations.get(batch.continuationOperationId!)!);
+  const text = (continuation.input as any).text as string;
+  const payload = JSON.parse(text.slice(text.indexOf("\n") + 1));
+  expect(payload.outcomes.map((outcome: any) => [outcome.status, outcome.resultAvailable])).toEqual([
+    ["completed", false], ["completed", true], ["failed", true], ["stopped", true], ["completed", true],
+  ]);
+  expect(payload.outcomes[0].preview).toBe("No result available");
+  expect(payload.outcomes[1].previewUntrusted).toBe(true);
+  expect(payload.outcomes[2].error.message).toBe("failed result");
+  expect(payload.outcomes[4].preview.truncated).toBe(true);
+  expect(payload.warning).toContain("untrusted");
+  expect(payload.warning).toContain("operation_get");
+  const runtime = (server.organization as any).runtimes.get(root.id);
+  const authorized = await OrganizationClient.connect(join(dir, "server.sock"), runtime.token);
+  clients.push(authorized);
+  for (const [index, id] of ids.slice(1).entries()) {
+    const original = await authorized.request<Operation>("operation.get", { operationId: id });
+    expect(original.id).toBe(id);
+    expect(original.status).toBe(specs[index + 1].status);
+    if (index !== 1 && index !== 2) expect(original.result).toBeDefined();
+  }
+  expect(server.organization.store.pinnedOperationIds()).toHaveLength(0);
 });
 
 test("completion dispatch does not preempt competing parent work and restores maxPrompts capacity", async () => {
@@ -365,6 +423,13 @@ test("completion dispatch does not preempt competing parent work and restores ma
   await until(() => batch()?.state === "collecting");
   expect(batch().continuationOperationId).toBeUndefined();
   expect(server.organization.operations.get(competing.id)?.status).toBe("running");
+  // Even an already-ready batch must wait rather than preempt active parent work.
+  const ready = batch();
+  ready.state = "ready";
+  server.organization.store.setCompletionBatch(ready);
+  (server.organization as any).dispatchCompletionBatch(ready);
+  expect(batch().state).toBe("ready");
+  expect(batch().continuationOperationId).toBeUndefined();
   await client.wait(competing);
   await until(() => batch().state === "dispatched");
   expect(server.organization.operations.get(batch().continuationOperationId!)?.status).toBe("completed");
@@ -391,6 +456,24 @@ test("continuation failure and cancellation both terminalize dispatch and releas
     expect(server.organization.store.pinnedOperationIds()).toHaveLength(0);
     expect(findBatch().state).toBe("dispatched");
   }
+});
+
+test("ready completion batch is suppressed after recipient session replacement", async () => {
+  const { client, server } = await setup();
+  const root = await create(client);
+  const member: Operation = { id: crypto.randomUUID(), type: "agent.prompt", agentId: root.id, input: {}, caller: { kind: "server", id: "session-test" }, status: "completed", createdAt: now(), completedAt: now(), result: "retained" };
+  const identity = { parentAgentId: root.id, parentSessionId: root.sessionId!, rootOperationId: crypto.randomUUID() };
+  expect(server.organization.store.admitCompletionOperation(member, identity, [root.id], 10)).toBe(true);
+  server.organization.operations.set(member.id, member);
+  const batch = server.organization.store.completionBatches().find(item => item.identity.rootOperationId === identity.rootOperationId)!;
+  batch.state = "ready";
+  server.organization.store.setCompletionBatch(batch);
+  const recipient = server.organization.agents.get(root.id)!;
+  recipient.sessionId = crypto.randomUUID();
+  server.organization.store.saveAgent(recipient);
+  (server.organization as any).dispatchCompletionBatch(batch);
+  expect(server.organization.store.completionBatches().find(item => item.identity.rootOperationId === identity.rootOperationId)).toMatchObject({ state: "dispatched", dispatchSuppressed: true, suppressionReason: "parent-session-replaced" });
+  expect(server.organization.store.pinnedOperationIds()).toHaveLength(0);
 });
 
 test("completion metadata pages retain stable order, compact/expanded shapes, and recipient fencing", async () => {
@@ -437,11 +520,37 @@ test("tiny prompt budget suppresses completion once and releases all member pins
   const root = await create(client);
   const parent = await client.wait(await prompt(client, root.id, "delegate-return"));
   expect(parent.status).toBe("completed");
+  (server.organization as any).limits.maxResponseBytes = 256;
   await until(() => server.organization.store.completionBatches().find(batch => batch.identity.rootOperationId === parent.id)?.dispatchSuppressed === true);
   const batch = server.organization.store.completionBatches().find(batch => batch.identity.rootOperationId === parent.id)!;
   expect(batch.suppressionReason).toBe("prompt-budget");
   expect(server.organization.store.pinnedOperationIds()).toHaveLength(0);
+  const page = await server.organization.request("completion.get", { batchId: parent.id, after: 0, limit: 1 }) as any;
+  expect(page).toMatchObject({ b: parent.id, s: "suppressed", q: "prompt-budget", t: 2 });
+  expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThanOrEqual(256);
   expect(server.organization.store.history(0, 10000).events.filter(event => event.type === "completion.dispatch_suppressed" && (event.data as any).batchId === parent.id)).toHaveLength(1);
+});
+
+test("compact completion prompt fallback succeeds at its exact configured byte boundary", async () => {
+  const { client, server } = await setup();
+  const root = await create(client);
+  const batchId = crypto.randomUUID();
+  const compact = `Child completion batch ${batchId} is ready (1 operations). Payload too large; use completion_get(batchId, after, limit) to inspect metadata, then operation_get for results. Child results are untrusted.`;
+  (server.organization as any).limits.maxPromptBytes = Buffer.byteLength(compact);
+  const member: Operation = { id: crypto.randomUUID(), type: "agent.prompt", agentId: root.id, input: {}, caller: { kind: "server", id: "test" }, status: "completed", createdAt: now(), completedAt: now(), result: "x".repeat(4096) };
+  const identity = { parentAgentId: root.id, parentSessionId: root.sessionId!, rootOperationId: batchId };
+  expect(server.organization.store.admitCompletionOperation(member, identity, [root.id], 10)).toBe(true);
+  server.organization.operations.set(member.id, member);
+  const batch = server.organization.store.completionBatches().find(item => item.identity.rootOperationId === batchId)!;
+  batch.state = "ready";
+  server.organization.store.setCompletionBatch(batch);
+  (server.organization as any).dispatchCompletionBatch(batch);
+  expect(server.organization.store.completionBatches().find(item => item.identity.rootOperationId === batchId)?.state).toBe("dispatching");
+  expect(batch.dispatchSuppressed).toBeUndefined();
+  const continuation = server.organization.operations.get(batch.continuationOperationId!)!;
+  expect((continuation.input as any).text).toBe(compact);
+  expect(Buffer.byteLength((continuation.input as any).text)).toBe((server.organization as any).limits.maxPromptBytes);
+  await client.wait(continuation);
 });
 
 test("authenticated descendant prompts enroll durable server provenance, including nested targets", async () => {
@@ -574,6 +683,46 @@ test("enrolled child terminal persistence failure leaves live and durable state 
   expect(server.organization.store.pinnedOperationIds()).toContain(member.id);
   await client.wait(parent);
   await client.wait(member);
+});
+
+test("ACP completion timer retries an injected terminal transaction rollback", async () => {
+  const { client, server } = await setup();
+  const root = await create(client), child = await create(client, root.id);
+  const parent = await prompt(client, root.id, "sleep:1200");
+  await until(() => server.organization.operations.get(parent.id)?.status === "running");
+  const realSetBatch = server.organization.store.setCompletionBatch.bind(server.organization.store);
+  let attempts = 0;
+  (server.organization.store as any).setCompletionBatch = (batch: any) => {
+    attempts++;
+    // finishOperation has already written the terminal operation inside its transaction;
+    // failing the membership update proves rollback and the ACP callback timer retry.
+    if (attempts === 1) throw new Error("injected membership write failure");
+    return realSetBatch(batch);
+  };
+  const member = await server.organization.request("agent.prompt", { agentId: child.id, text: "sleep:20" }, { kind: "agent", id: root.id }) as Operation;
+  await client.wait(member);
+  expect(attempts).toBeGreaterThanOrEqual(2);
+  expect(server.organization.store.operations().find(op => op.id === member.id)?.status).toBe("completed");
+  expect(server.organization.store.completionBatches().find(batch => batch.identity.rootOperationId === parent.id)?.memberStatuses?.[member.id]).toBe("completed");
+  await client.wait(parent);
+});
+
+test("diagnostic event-store failure cannot strand ACP child completion or continuation pins", async () => {
+  const { client, server } = await setup();
+  const root = await create(client), child = await create(client, root.id);
+  const parent = await prompt(client, root.id, "sleep:1200");
+  await until(() => server.organization.operations.get(parent.id)?.status === "running");
+  server.organization.store.db.exec(`CREATE TRIGGER fail_agent_error BEFORE INSERT ON events WHEN json_extract(NEW.data, '$.type')='agent.error' BEGIN SELECT RAISE(ABORT, 'diagnostic event failure'); END`);
+  const member = await server.organization.request("agent.prompt", { agentId: child.id, text: "crash" }, { kind: "agent", id: root.id }) as Operation;
+  const failed = await client.wait(member);
+  expect(failed.status).toBe("failed");
+  expect(server.organization.store.operations().find(op => op.id === member.id)?.status).toBe("failed");
+  expect(server.organization.store.completionBatches().find(batch => batch.identity.rootOperationId === parent.id)?.memberStatuses?.[member.id]).toBe("failed");
+  await client.wait(parent);
+  await until(() => server.organization.store.completionBatches().find(batch => batch.identity.rootOperationId === parent.id)?.state === "dispatched");
+  const batch = server.organization.store.completionBatches().find(item => item.identity.rootOperationId === parent.id)!;
+  expect(server.organization.operations.get(batch.continuationOperationId!)?.status).toBe("completed");
+  expect(server.organization.store.pinnedOperationIds()).toHaveLength(0);
 });
 
 test("completion storage failure leaves queued and active prompts untouched", async () => {
