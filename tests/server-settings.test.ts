@@ -35,6 +35,10 @@ test("core descriptors, shared reads, safe validation and client-only authorizat
     const snapshot = await org.request("organization.snapshot", {}, client) as any;
     expect(snapshot.capabilities.serverSettings.version).toBe(1);
     expect(snapshot.capabilities.serverSettings.groups[0].fields).toHaveLength(Object.keys(defaults).length);
+    expect(defaults.maxPendingCompletionOperations).toBe(1024);
+    const completionLimit = snapshot.capabilities.serverSettings.groups[0].fields.find((field: any) => field.key === "maxPendingCompletionOperations");
+    expect(completionLimit).toMatchObject({ editor: "number", min: 1, effect: "immediate" });
+    expect(completionLimit.description).toContain("entire server");
     expect(JSON.stringify(snapshot.capabilities.serverSettings)).not.toContain('"values"');
     const catalog = await org.request("organization.settings.list", {}, client) as any;
     expect(catalog.facts.dataDir).toBe(dir);
@@ -42,7 +46,7 @@ test("core descriptors, shared reads, safe validation and client-only authorizat
     const agent = { kind: "agent", id: "unprivileged" } as const;
     for (const method of ["list", "get", "update"]) await expect(org.request(`organization.settings.${method}`, {}, agent)).rejects.toMatchObject({ code: "FORBIDDEN" });
     expect((await org.request("organization.snapshot", {}, agent) as any).capabilities.serverSettings).toBeUndefined();
-    for (const patch of [{ maxDepth: 0 }, { maxDepth: 1.1 }, { maxDepth: Number.MAX_SAFE_INTEGER + 1 }, { maxResponseBytes: 255 }, { secret: "never save" }]) {
+    for (const patch of [{ maxDepth: 0 }, { maxDepth: 1.1 }, { maxDepth: Number.MAX_SAFE_INTEGER + 1 }, { maxResponseBytes: 255 }, { maxPendingCompletionOperations: 0 }, { secret: "never save" }]) {
       await expect(update(org, 0, patch)).rejects.toMatchObject({ code: "INVALID_PARAMS" });
     }
     await expect(update(org, 0, { maxDepth: 2 }, ["maxDepth"])).rejects.toMatchObject({ code: "INVALID_PARAMS" });

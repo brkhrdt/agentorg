@@ -48,6 +48,8 @@ export type OperationStatus =
   | "stopped";
 export interface Operation {
   id: string;
+  /** Optional server-owned prompt origin. Absent on legacy and non-prompt operations. */
+  promptProvenance?: PromptProvenance;
   caller: Caller;
   agentId: string | null;
   type: string;
@@ -59,6 +61,13 @@ export interface Operation {
   error?: ApiErrorShape;
   cancelRequested?: boolean;
   input: unknown;
+}
+export interface PromptProvenance {
+  kind: "parent-completion";
+  parentOperationId: string;
+  parentAgentId: string;
+  parentSessionId: string;
+  parentGeneration: string | null;
 }
 export type Caller =
   | { kind: "client"; id: string }
@@ -111,6 +120,7 @@ export const defaults = {
   maxEvents: 100_000,
   maxOperations: 10_000,
   maxQueuedPrompts: 100,
+  maxPendingCompletionOperations: 1024,
   maxAgents: 10_000,
   maxLineBytes: 2 * 1024 * 1024,
   maxClientBufferBytes: 4 * 1024 * 1024,
