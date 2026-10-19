@@ -333,6 +333,21 @@ test("authenticated descendant prompts enroll durable server provenance, includi
   await client.wait(parent);
 });
 
+test("settled completion batches become ready and a late member revokes readiness", async () => {
+  const { client, server } = await setup();
+  const root = await create(client);
+  const child = await create(client, root.id);
+  const parent = await prompt(client, root.id, "sleep:1500");
+  await until(() => server.organization.operations.get(parent.id)?.status === "running");
+  const issue = (text: string) => server.organization.request("agent.prompt", { agentId: child.id, text }, { kind: "agent", id: root.id }) as Promise<Operation>;
+  const first = await issue("sleep:10");
+  await until(() => server.organization.store.completionBatches()[0]?.state === "ready");
+  const second = await issue("sleep:10");
+  expect(server.organization.store.completionBatches()[0]).toMatchObject({ state: "collecting", memberOperationIds: [first.id, second.id] });
+  await until(() => server.organization.store.completionBatches()[0]?.state === "ready");
+  await client.wait(parent);
+});
+
 test("enrolled members record failed, cancelled, superseded, and stopped terminal outcomes", async () => {
   const { client, server } = await setup();
   const root = await create(client);

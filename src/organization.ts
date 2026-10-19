@@ -115,6 +115,7 @@ export class Organization implements PluginHost {
   private permissions = new Map<string, Permission>();
   private tail: Promise<unknown> = Promise.resolve();
   private closing = false;
+  private initialized = false;
   private closePromise?: Promise<void>;
   private observerContext = new AsyncLocalStorage<boolean>();
   constructor(
@@ -373,7 +374,10 @@ export class Organization implements PluginHost {
     this.tail = result
       .catch(() => {})
       .finally(() => {
-        if (!this.closing) this.pump();
+        if (!this.closing) {
+          this.pump();
+          this.reconcileCompletionBatches();
+        }
       });
     return result;
   }
@@ -513,8 +517,53 @@ export class Organization implements PluginHost {
             this.state(a, "failed", errorShape(error).message);
           }
         }
+      this.initialized = true;
       this.emit("server.ready", { recover, limits: this.limits });
+      this.reconcileCompletionBatches();
     });
+  }
+  /** Evaluate only enrolled roots, deepest first, once serialized state has settled. */
+  private reconcileCompletionBatches() {
+    if (!this.initialized || this.closing) return;
+    const batches = this.store.completionBatches()
+      .filter(batch => batch.state === "collecting" || batch.state === "ready")
+      .sort((a, b) => Math.max(...b.relevantRootAgentIds.map(id => this.agentDepth(id))) - Math.max(...a.relevantRootAgentIds.map(id => this.agentDepth(id))));
+    for (const batch of batches) {
+      const ready = batch.memberOperationIds.length > 0 && batch.memberOperationIds.every(id => {
+        const op = this.operations.get(id);
+        return !!op && terminal(op);
+      }) && this.completionSubtreesSettled(batch);
+      if (ready && batch.state === "collecting") {
+        batch.state = "ready";
+        this.store.setCompletionBatch(batch);
+      } else if (!ready && batch.state === "ready") {
+        batch.state = "collecting";
+        this.store.setCompletionBatch(batch);
+      }
+    }
+  }
+  private agentDepth(id: string): number {
+    const agent = this.agents.get(id);
+    if (!agent) return -1;
+    let depth = 0, current = agent;
+    while (current.parentId && this.agents.has(current.parentId)) { depth++; current = this.agents.get(current.parentId)!; }
+    return depth;
+  }
+  private completionSubtreesSettled(batch: import("./completion-contract.ts").CompletionBatch): boolean {
+    const roots = [...new Set(batch.relevantRootAgentIds)].map(id => this.agents.get(id)).filter((a): a is AgentRecord => !!a);
+    const relevant = [...this.agents.values()].filter(a => roots.some(root => this.isDescendant(a.id, root.id)));
+    for (const agent of relevant) {
+      const runtime = this.runtimes.get(agent.id);
+      const parentOperationActive = agent.id === batch.identity.parentAgentId && runtime?.active?.op.id === batch.identity.rootOperationId;
+      if ((runtime?.active && !parentOperationActive) || runtime?.queue.some(op => !terminal(op))) return false;
+      if (!parentOperationActive && !agent.removedAt && !["idle", "stopped", "failed"].includes(agent.state)) return false;
+    }
+    // Lifecycle work can create, restart, or otherwise make a relevant subtree busy.
+    for (const op of this.operations.values()) {
+      if (terminal(op) || op.type === "agent.prompt") continue;
+      if (op.agentId && relevant.some(agent => this.isDescendant(op.agentId!, agent.id))) return false;
+    }
+    return true;
   }
   private depth(a: AgentRecord): number {
     let depth = 0;
