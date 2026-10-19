@@ -525,14 +525,15 @@ export class Organization implements PluginHost {
   /** Evaluate only enrolled roots, deepest first, once serialized state has settled. */
   private reconcileCompletionBatches() {
     if (!this.initialized || this.closing) return;
-    const batches = this.store.completionBatches()
+    const allBatches = this.store.completionBatches();
+    const batches = allBatches
       .filter(batch => batch.state === "collecting" || batch.state === "ready")
       .sort((a, b) => Math.max(...b.relevantRootAgentIds.map(id => this.agentDepth(id))) - Math.max(...a.relevantRootAgentIds.map(id => this.agentDepth(id))));
     for (const batch of batches) {
       const ready = batch.memberOperationIds.length > 0 && batch.memberOperationIds.every(id => {
         const op = this.operations.get(id);
         return !!op && terminal(op);
-      }) && this.completionSubtreesSettled(batch);
+      }) && this.completionSubtreesSettled(batch) && this.descendantCompletionBatchesTerminal(batch, allBatches);
       if (ready && batch.state === "collecting") {
         batch.state = "ready";
         this.store.setCompletionBatch(batch);
@@ -548,6 +549,13 @@ export class Organization implements PluginHost {
     let depth = 0, current = agent;
     while (current.parentId && this.agents.has(current.parentId)) { depth++; current = this.agents.get(current.parentId)!; }
     return depth;
+  }
+  private descendantCompletionBatchesTerminal(batch: import("./completion-contract.ts").CompletionBatch, batches: import("./completion-contract.ts").CompletionBatch[]): boolean {
+    return batches.every(candidate => {
+      if (candidate === batch || candidate.identity.rootOperationId === batch.identity.rootOperationId && candidate.identity.parentSessionId === batch.identity.parentSessionId && candidate.identity.parentAgentId === batch.identity.parentAgentId) return true;
+      const nested = batch.relevantRootAgentIds.some(rootId => this.agents.has(rootId) && this.isDescendant(candidate.identity.parentAgentId, rootId));
+      return !nested || ["dispatched", "invalidated"].includes(candidate.state);
+    });
   }
   private completionSubtreesSettled(batch: import("./completion-contract.ts").CompletionBatch): boolean {
     const roots = [...new Set(batch.relevantRootAgentIds)].map(id => this.agents.get(id)).filter((a): a is AgentRecord => !!a);
@@ -986,9 +994,7 @@ export class Organization implements PluginHost {
             };
             op.promptProvenance = provenance;
             const identity = { parentAgentId: caller.id, parentSessionId, rootOperationId: parentOperation!.id };
-            let root = parentAgent!;
-            while (root.parentId && this.agents.has(root.parentId)) root = this.agents.get(root.parentId)!;
-            if (!this.store.admitCompletionOperation(op, identity, [root.id], this.limits.maxPendingCompletionOperations))
+            if (!this.store.admitCompletionOperation(op, identity, [a.id], this.limits.maxPendingCompletionOperations))
               throw new ApiError("LIMIT", "Parent-completion operation capacity reached");
             this.operations.set(op.id, op);
             this.emit("operation.changed", op, op.agentId ?? undefined);

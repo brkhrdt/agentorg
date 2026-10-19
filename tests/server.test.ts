@@ -337,6 +337,9 @@ test("settled completion batches become ready and a late member revokes readines
   const { client, server } = await setup();
   const root = await create(client);
   const child = await create(client, root.id);
+  const sibling = await create(client, root.id);
+  const busySibling = await prompt(client, sibling.id, "sleep:5000");
+  await until(() => server.organization.operations.get(busySibling.id)?.status === "running");
   const parent = await prompt(client, root.id, "sleep:1500");
   await until(() => server.organization.operations.get(parent.id)?.status === "running");
   const issue = (text: string) => server.organization.request("agent.prompt", { agentId: child.id, text }, { kind: "agent", id: root.id }) as Promise<Operation>;
@@ -346,6 +349,30 @@ test("settled completion batches become ready and a late member revokes readines
   expect(server.organization.store.completionBatches()[0]).toMatchObject({ state: "collecting", memberOperationIds: [first.id, second.id] });
   await until(() => server.organization.store.completionBatches()[0]?.state === "ready");
   await client.wait(parent);
+});
+
+test("ancestor completion readiness waits for nested batches to become terminal", async () => {
+  const { client, server } = await setup();
+  const a = await create(client), b = await create(client, a.id), c = await create(client, b.id);
+  const activeA = await prompt(client, a.id, "sleep:1000");
+  await until(() => server.organization.operations.get(activeA.id)?.status === "running");
+  const add = (parent: AgentRecord, target: AgentRecord, rootOperationId: string = crypto.randomUUID()) => {
+    const op: Operation = { id: crypto.randomUUID(), type: "agent.prompt", agentId: target.id, input: {}, caller: { kind: "server", id: "test" }, status: "completed", createdAt: now(), completedAt: now() };
+    const identity = { parentAgentId: parent.id, parentSessionId: parent.sessionId!, rootOperationId };
+    expect(server.organization.store.admitCompletionOperation(op, identity, [target.id], 100)).toBe(true);
+    server.organization.operations.set(op.id, op);
+    return identity;
+  };
+  const outer = add(a, b, activeA.id), inner = add(b, c);
+  (server.organization as any).reconcileCompletionBatches();
+  expect(server.organization.store.completionBatches().find(x => x.identity.rootOperationId === inner.rootOperationId)?.state).toBe("ready");
+  expect(server.organization.store.completionBatches().find(x => x.identity.rootOperationId === outer.rootOperationId)?.state).toBe("collecting");
+  const nested = server.organization.store.completionBatches().find(x => x.identity.rootOperationId === inner.rootOperationId)!;
+  nested.state = "dispatched";
+  server.organization.store.setCompletionBatch(nested);
+  (server.organization as any).reconcileCompletionBatches();
+  expect(server.organization.store.completionBatches().find(x => x.identity.rootOperationId === outer.rootOperationId)?.state).toBe("ready");
+  await client.wait(activeA);
 });
 
 test("enrolled members record failed, cancelled, superseded, and stopped terminal outcomes", async () => {
