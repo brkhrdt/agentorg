@@ -58,7 +58,7 @@ export function pluginHost(host: PluginHost, name: string): PluginHost {
   function tool(definition: ToolDefinition): ToolDefinition {
     return {
       ...definition,
-      execute: wrap((args, caller) => definition.execute(args, caller, scoped)),
+      execute: wrap((args, caller, _api, authenticatedAgent) => definition.execute(args, caller, scoped, authenticatedAgent)),
     };
   }
   const scoped: PluginHost = {

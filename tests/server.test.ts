@@ -384,7 +384,12 @@ test("completion storage failure leaves queued and active prompts untouched", as
 });
 
 test("socket prompts authenticated before queued restart reject stale generation without side effects", async () => {
-  const { client, server, dir } = await setup();
+  const passthroughTransform: ServerPlugin = {
+    apiVersion: 1,
+    name: "descendant-prompt-passthrough",
+    setup(host) { host.transformTool("descendant_prompt", tool => tool); },
+  };
+  const { client, server, dir } = await setup({}, [passthroughTransform]);
   const root = await create(client);
   const child = await create(client, root.id);
   const blocker = await create(client, root.id, { START_DELAY: "350" });
@@ -398,8 +403,12 @@ test("socket prompts authenticated before queued restart reject stale generation
   const oldToken = (server.organization as any).runtimes.get(root.id).token as string;
   const agentClient = await OrganizationClient.connect(join(dir, "server.sock"), oldToken);
   clients.push(agentClient);
-  const stalePrompt = agentClient.request<Operation>("agent.prompt", { agentId: child.id, text: "must not supersede" });
-  await expect(stalePrompt).rejects.toMatchObject({ code: "FORBIDDEN" });
+  const stalePrompt = await agentClient.request<any>("mcp.call", {
+    name: "descendant_prompt",
+    arguments: { agentId: child.id, text: "must not supersede" },
+  });
+  expect(stalePrompt.isError).toBe(true);
+  expect(JSON.parse(stalePrompt.content[0].text).code).toBe("FORBIDDEN");
   await client.wait(parentRestart);
   expect(server.organization.operations.get(childWork.id)?.status).toBe("running");
   expect(server.organization.store.completionBatches()).toHaveLength(0);
