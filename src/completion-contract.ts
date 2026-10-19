@@ -27,6 +27,7 @@ export interface CompletionBatch {
   state: CompletionBatchState;
   memberOperationIds: string[];
   relevantRootAgentIds: string[];
+  memberStatuses?: Record<string, import("./types.ts").Operation["status"]>;
 }
 
 export type CompletionBatchAction = "member-added" | "became-ready" | "readiness-revoked" | "dispatch-started" | "dispatch-finished" | "invalidated";

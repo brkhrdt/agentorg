@@ -405,6 +405,7 @@ export class Organization implements PluginHost {
     op.result = bounded(result, this.limits.maxResponseBytes);
     if (error) op.error = errorShape(error);
     this.saveOp(op);
+    this.store.updateCompletionMemberStatus(op.id, status);
   }
   private newOp(
     type: string,
@@ -900,6 +901,37 @@ export class Organization implements PluginHost {
             throw new ApiError("NOT_RUNNING", "Agent is not available");
           if (p.queue && rt.queue.length >= this.limits.maxQueuedPrompts)
             throw new ApiError("LIMIT", "Prompt queue limit reached");
+          const parentRuntime = caller.kind === "agent" ? this.runtimes.get(caller.id) : undefined;
+          const parentAgent = caller.kind === "agent" ? this.agents.get(caller.id) : undefined;
+          const parentOperation = parentRuntime?.active?.op;
+          const enrolled = !!(parentAgent && parentOperation && parentOperation.type === "agent.prompt" && !terminal(parentOperation) && this.isDescendant(a.id, caller.id, false));
+          const op: Operation = {
+            id: crypto.randomUUID(), type: method, agentId: a.id,
+            input: structuredClone(p), caller: structuredClone(caller), status: "queued", createdAt: now(),
+          };
+          if (enrolled) {
+            const parentSessionId = parentAgent!.sessionId;
+            if (!parentSessionId) throw new ApiError("NOT_RUNNING", "Issuing agent has no active session");
+            const provenance = {
+              kind: "parent-completion" as const,
+              parentOperationId: parentOperation!.id,
+              parentAgentId: caller.id,
+              parentSessionId,
+              parentGeneration: parentRuntime!.generation,
+            };
+            op.promptProvenance = provenance;
+            const identity = { parentAgentId: caller.id, parentSessionId, rootOperationId: parentOperation!.id };
+            let root = parentAgent!;
+            while (root.parentId && this.agents.has(root.parentId)) root = this.agents.get(root.parentId)!;
+            if (!this.store.admitCompletionOperation(op, identity, [root.id], this.limits.maxPendingCompletionOperations))
+              throw new ApiError("LIMIT", "Parent-completion operation capacity reached");
+            this.operations.set(op.id, op);
+            this.emit("operation.changed", op, op.agentId ?? undefined);
+            for (const id of this.store.pruneTerminalOperations(this.limits.maxOperations)) this.operations.delete(id);
+          } else {
+            this.operations.set(op.id, op);
+            this.saveOp(op);
+          }
           if (!p.queue) {
             for (const queued of rt.queue.splice(0))
               this.finish(
@@ -910,7 +942,6 @@ export class Organization implements PluginHost {
               );
             if (rt.active) this.cancelPrompt(a, rt, rt.active);
           }
-          const op = this.newOp(method, a.id, p, caller);
           rt.queue.push(op);
           if (!rt.active) this.state(a, "waiting");
           this.emit(

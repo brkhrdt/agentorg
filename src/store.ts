@@ -86,7 +86,7 @@ export class Store {
       // a terminal result remains retained and consumes capacity until its pin is released.
       const pending = this.db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM result_pins").get()!.count;
       if (pending >= maxPending || this.db.query("SELECT 1 FROM operations WHERE id=?").get(op.id)) return false;
-      const key = [identity.parentAgentId, identity.parentSessionId, identity.rootOperationId] as const;
+      const key: [string, string, string] = [identity.parentAgentId, identity.parentSessionId, identity.rootOperationId];
       const existing = this.db.query<{ data: string }, typeof key>(`SELECT data FROM completion_batches WHERE parent_agent_id=? AND parent_session_id=? AND root_operation_id=?`).get(...key);
       if (existing) {
         const state = (JSON.parse(existing.data) as CompletionBatch).state;
@@ -104,6 +104,7 @@ export class Store {
       const row = this.db.query<{ data: string }, typeof key>("SELECT data FROM completion_batches WHERE parent_agent_id=? AND parent_session_id=? AND root_operation_id=?").get(...key)!;
       const batch = JSON.parse(row.data) as CompletionBatch;
       batch.memberOperationIds.push(op.id);
+      batch.memberStatuses = { ...batch.memberStatuses, [op.id]: op.status };
       batch.state = "collecting";
       batch.relevantRootAgentIds = [...new Set([...batch.relevantRootAgentIds, ...relevantRootAgentIds])];
       this.db.query("UPDATE completion_batches SET data=? WHERE parent_agent_id=? AND parent_session_id=? AND root_operation_id=?").run(JSON.stringify(batch), ...key);
@@ -112,6 +113,13 @@ export class Store {
   }
   completionBatches(): CompletionBatch[] {
     return this.db.query<{ data: string }, []>("SELECT data FROM completion_batches ORDER BY rowid").all().map(row => JSON.parse(row.data));
+  }
+  updateCompletionMemberStatus(operationId: string, status: Operation["status"]) {
+    const row = this.db.query<{ data: string }, [string]>("SELECT data FROM completion_batches WHERE EXISTS (SELECT 1 FROM completion_members WHERE completion_members.parent_agent_id=completion_batches.parent_agent_id AND completion_members.parent_session_id=completion_batches.parent_session_id AND completion_members.root_operation_id=completion_batches.root_operation_id AND completion_members.operation_id=?)").get(operationId);
+    if (!row) return;
+    const batch = JSON.parse(row.data) as CompletionBatch;
+    batch.memberStatuses = { ...batch.memberStatuses, [operationId]: status };
+    this.setCompletionBatch(batch);
   }
   setCompletionBatch(batch: CompletionBatch) {
     const { parentAgentId, parentSessionId, rootOperationId } = batch.identity;

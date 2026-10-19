@@ -299,7 +299,7 @@ test("MCP SDK bridge enforces direct-child creation and subtree permissions", as
 });
 
 test("root coordinates two children through organization tools without holding lifecycle queue", async () => {
-  const { client } = await setup();
+  const { client, server } = await setup();
   const root = await create(client);
   const done = await client.wait(await prompt(client, root.id, "delegate"));
   expect(done.status).toBe("completed");
@@ -307,6 +307,49 @@ test("root coordinates two children through organization tools without holding l
   expect(
     snapshot.agents.filter((a: AgentRecord) => a.parentId === root.id),
   ).toHaveLength(2);
+  const batch = server.organization.store.completionBatches().find(b => b.identity.rootOperationId === done.id);
+  expect(batch?.identity.parentAgentId).toBe(root.id);
+  expect(batch?.memberOperationIds).toHaveLength(2);
+  expect(Object.values(batch?.memberStatuses ?? {})).toEqual(["completed", "completed"]);
+});
+
+test("authenticated descendant prompts enroll durable server provenance, including nested targets", async () => {
+  const { client, server } = await setup();
+  const root = await create(client);
+  const child = await create(client, root.id);
+  const grandchild = await create(client, child.id);
+  const parent = await prompt(client, root.id, "sleep:300");
+  await until(() => server.organization.operations.get(parent.id)?.status === "running");
+  const issued = await server.organization.request("agent.prompt", { agentId: grandchild.id, text: "sleep:20" }, { kind: "agent", id: root.id }) as Operation;
+  expect(issued.promptProvenance).toMatchObject({
+    kind: "parent-completion", parentOperationId: parent.id, parentAgentId: root.id,
+    parentSessionId: root.sessionId, parentGeneration: root.generation,
+  });
+  const batch = server.organization.store.completionBatches()[0];
+  expect(batch.identity).toEqual({ parentAgentId: root.id, parentSessionId: root.sessionId, rootOperationId: parent.id });
+  expect(batch.memberOperationIds).toContain(issued.id);
+  await until(() => server.organization.operations.get(issued.id)?.status === "completed");
+  expect(server.organization.store.completionBatches()[0].memberStatuses?.[issued.id]).toBe("completed");
+  await client.wait(parent);
+});
+
+test("client prompts are unattributed and completion capacity rejection has no cancellation effects", async () => {
+  const { client, server } = await setup({ maxPendingCompletionOperations: 1 });
+  const root = await create(client);
+  const child = await create(client, root.id);
+  const grandchild = await create(client, child.id);
+  const childWork = await prompt(client, child.id, "sleep:500");
+  await until(() => server.organization.operations.get(childWork.id)?.status === "running");
+  const parent = await prompt(client, root.id, "sleep:500");
+  await until(() => server.organization.operations.get(parent.id)?.status === "running");
+  const enrolled = await server.organization.request("agent.prompt", { agentId: grandchild.id, text: "sleep:10" }, { kind: "agent", id: root.id }) as Operation;
+  expect(enrolled.promptProvenance?.kind).toBe("parent-completion");
+  await expect(server.organization.request("agent.prompt", { agentId: child.id, text: "replacement" }, { kind: "agent", id: root.id })).rejects.toMatchObject({ code: "LIMIT" });
+  expect(server.organization.operations.get(childWork.id)?.status).toBe("running");
+  const clientPrompt = await prompt(client, grandchild.id, "client-origin", true);
+  expect(clientPrompt.promptProvenance).toBeUndefined();
+  await client.wait(parent);
+  await client.wait(childWork);
 });
 
 test("live filters, monotonically increasing durable events, malformed requests", async () => {
