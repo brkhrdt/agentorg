@@ -134,6 +134,7 @@ export class Organization implements PluginHost {
     } catch (error) { this.store.close(); throw error; }
     for (const a of this.store.agents()) this.agents.set(a.id, a);
     for (const op of this.store.operations()) this.operations.set(op.id, op);
+    for (const id of this.store.pruneTerminalOperations(this.limits.maxOperations)) this.operations.delete(id);
     this.registerBuiltinTools();
   }
   async use(plugin: ServerPlugin) {
@@ -390,14 +391,7 @@ export class Organization implements PluginHost {
   private saveOp(op: Operation) {
     this.store.saveOperation(op);
     this.emit("operation.changed", op, op.agentId ?? undefined);
-    const done = [...this.operations.values()].filter(terminal);
-    for (const old of done.slice(
-      0,
-      Math.max(0, done.length - this.limits.maxOperations),
-    )) {
-      this.operations.delete(old.id);
-      this.store.deleteOperation(old.id);
-    }
+    for (const id of this.store.pruneTerminalOperations(this.limits.maxOperations)) this.operations.delete(id);
   }
   private finish(
     op: Operation,

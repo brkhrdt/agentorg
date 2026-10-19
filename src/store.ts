@@ -3,6 +3,7 @@ import { mkdirSync, chmodSync } from "node:fs";
 import { dirname } from "node:path";
 import type { AgentRecord, Operation, ServerEvent } from "./types.ts";
 import type { ServerSettingsRecord } from "./server-settings.ts";
+import type { CompletionBatch, CompletionBatchIdentity } from "./completion-contract.ts";
 
 /** Records are durable; only bounded event and terminal-operation history is pruned. */
 export class Store {
@@ -18,6 +19,14 @@ export class Store {
       CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS server_settings (namespace TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY, agent_id TEXT, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS completion_batches (
+        parent_agent_id TEXT NOT NULL, parent_session_id TEXT NOT NULL, root_operation_id TEXT NOT NULL,
+        data TEXT NOT NULL, PRIMARY KEY(parent_agent_id, parent_session_id, root_operation_id));
+      CREATE TABLE IF NOT EXISTS completion_members (
+        parent_agent_id TEXT NOT NULL, parent_session_id TEXT NOT NULL, root_operation_id TEXT NOT NULL,
+        operation_id TEXT NOT NULL UNIQUE, PRIMARY KEY(parent_agent_id, parent_session_id, root_operation_id, operation_id),
+        FOREIGN KEY(parent_agent_id, parent_session_id, root_operation_id) REFERENCES completion_batches(parent_agent_id, parent_session_id, root_operation_id));
+      CREATE TABLE IF NOT EXISTS result_pins (operation_id TEXT PRIMARY KEY);
       CREATE INDEX IF NOT EXISTS events_tool_context ON events (
         agent_id, json_extract(data, '$.generation'), json_extract(data, '$.data.toolCallId'), seq
       ) WHERE json_extract(data, '$.type') IN ('tool.call', 'tool.update', 'tool.result')
@@ -28,8 +37,8 @@ export class Store {
     const version = this.db
       .query<{ value: number }, []>("SELECT value FROM meta WHERE key='schema'")
       .get()!.value;
-    if (version !== 1)
-      throw new Error(`Unsupported database schema ${version}`);
+    if (version === 1) this.db.query("UPDATE meta SET value=2 WHERE key='schema'").run();
+    else if (version !== 2) throw new Error(`Unsupported database schema ${version}`);
   }
   serverSettings(namespace: string): ServerSettingsRecord | undefined {
     const row = this.db.query<{ data: string }, [string]>("SELECT data FROM server_settings WHERE namespace=?").get(namespace);
@@ -67,6 +76,57 @@ export class Store {
   }
   deleteOperation(id: string) {
     this.db.query("DELETE FROM operations WHERE id=?").run(id);
+  }
+  /** Atomically admit a trusted completion member, recording the operation, membership, and retention pin.
+   * Rejection is read-only: callers can safely perform this before superseding existing work. */
+  admitCompletionOperation(op: Operation, identity: CompletionBatchIdentity, relevantRootAgentIds: string[], maxPending: number): boolean {
+    if (!Number.isSafeInteger(maxPending) || maxPending < 1) return false;
+    return this.db.transaction(() => {
+      const pending = this.db.query<{ count: number }, []>(`
+        SELECT COUNT(*) AS count FROM completion_members m JOIN operations o ON o.id=m.operation_id
+        WHERE json_extract(o.data, '$.status') NOT IN ('completed','failed','stopped')
+      `).get()!.count;
+      if (pending >= maxPending || this.db.query("SELECT 1 FROM operations WHERE id=?").get(op.id)) return false;
+      const key = [identity.parentAgentId, identity.parentSessionId, identity.rootOperationId] as const;
+      const existing = this.db.query<{ data: string }, typeof key>(`SELECT data FROM completion_batches WHERE parent_agent_id=? AND parent_session_id=? AND root_operation_id=?`).get(...key);
+      if (existing && JSON.parse(existing.data).state !== "collecting") return false;
+      if (!existing) {
+        const batch: CompletionBatch = { identity, state: "collecting", memberOperationIds: [], relevantRootAgentIds: [...new Set(relevantRootAgentIds)] };
+        this.db.query("INSERT INTO completion_batches VALUES (?, ?, ?, ?)").run(...key, JSON.stringify(batch));
+      }
+      this.saveOperation(op);
+      this.db.query("INSERT INTO completion_members VALUES (?, ?, ?, ?)").run(...key, op.id);
+      this.db.query("INSERT INTO result_pins VALUES (?)").run(op.id);
+      const row = this.db.query<{ data: string }, typeof key>("SELECT data FROM completion_batches WHERE parent_agent_id=? AND parent_session_id=? AND root_operation_id=?").get(...key)!;
+      const batch = JSON.parse(row.data) as CompletionBatch;
+      batch.memberOperationIds.push(op.id);
+      batch.relevantRootAgentIds = [...new Set([...batch.relevantRootAgentIds, ...relevantRootAgentIds])];
+      this.db.query("UPDATE completion_batches SET data=? WHERE parent_agent_id=? AND parent_session_id=? AND root_operation_id=?").run(JSON.stringify(batch), ...key);
+      return true;
+    })();
+  }
+  completionBatches(): CompletionBatch[] {
+    return this.db.query<{ data: string }, []>("SELECT data FROM completion_batches ORDER BY rowid").all().map(row => JSON.parse(row.data));
+  }
+  setCompletionBatch(batch: CompletionBatch) {
+    const { parentAgentId, parentSessionId, rootOperationId } = batch.identity;
+    this.db.query("UPDATE completion_batches SET data=? WHERE parent_agent_id=? AND parent_session_id=? AND root_operation_id=?").run(JSON.stringify(batch), parentAgentId, parentSessionId, rootOperationId);
+  }
+  releaseCompletionPins(identity: CompletionBatchIdentity) {
+    this.db.transaction(() => {
+      this.db.query("DELETE FROM result_pins WHERE operation_id IN (SELECT operation_id FROM completion_members WHERE parent_agent_id=? AND parent_session_id=? AND root_operation_id=?)").run(identity.parentAgentId, identity.parentSessionId, identity.rootOperationId);
+    })();
+  }
+  pinnedOperationIds(): string[] {
+    return this.db.query<{ operation_id: string }, []>("SELECT operation_id FROM result_pins").all().map(row => row.operation_id);
+  }
+  pruneTerminalOperations(maxOperations: number): string[] {
+    const pinned = new Set(this.pinnedOperationIds());
+    const terminalRows = this.operations().filter(op => ["completed", "failed", "stopped"].includes(op.status));
+    const unpinned = terminalRows.filter(op => !pinned.has(op.id));
+    const remove = unpinned.slice(0, Math.max(0, terminalRows.length - maxOperations));
+    for (const op of remove) this.deleteOperation(op.id);
+    return remove.map(op => op.id);
   }
   event(event: Omit<ServerEvent, "seq">, maxEvents: number): ServerEvent {
     return this.db.transaction(() => {
