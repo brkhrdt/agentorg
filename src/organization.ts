@@ -409,17 +409,17 @@ export class Organization implements PluginHost {
     error?: unknown,
   ) {
     if (terminal(op)) return;
-    op.status = status;
-    op.completedAt = now();
-    op.result = bounded(result, this.limits.maxResponseBytes);
-    if (error) op.error = errorShape(error);
+    const completed: Operation = { ...op, status, completedAt: now(), result: bounded(result, this.limits.maxResponseBytes) };
+    if (error) completed.error = errorShape(error);
     const batch = this.store.completionBatches().find(candidate => candidate.continuationOperationId === op.id);
     if (batch) {
-      this.store.finishCompletion(op, batch);
+      if (!this.store.finishCompletion(completed, batch)) throw new Error("Completion continuation transition rejected");
+      Object.assign(op, completed);
       this.emit("operation.changed", op, op.agentId ?? undefined);
       for (const id of this.store.pruneTerminalOperations(this.limits.maxOperations)) this.operations.delete(id);
       this.emit("completion.dispatch_finished", { batchId: batch.identity.rootOperationId, status }, batch.identity.parentAgentId);
     } else {
+      Object.assign(op, completed);
       this.saveOp(op);
     }
     this.store.updateCompletionMemberStatus(op.id, status);
@@ -1072,6 +1072,11 @@ export class Organization implements PluginHost {
       }
       case "completion.get": {
         const p = z.object({ batchId: z.string(), after: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(100).default(25) }).strict().parse(params);
+        if (caller.kind === "agent") {
+          const current = this.agents.get(caller.id), runtime = this.runtimes.get(caller.id);
+          if (!authenticatedAgent || !current || !runtime || current.sessionId !== authenticatedAgent.sessionId || runtime.generation !== authenticatedAgent.generation)
+            throw new ApiError("FORBIDDEN", "Expired agent capability");
+        }
         const batch = this.store.completionBatches().find(candidate => candidate.identity.rootOperationId === p.batchId && (caller.kind !== "agent" || candidate.identity.parentAgentId === caller.id));
         if (!batch) {
           const exists = this.store.completionBatches().some(candidate => candidate.identity.rootOperationId === p.batchId);
@@ -1086,7 +1091,7 @@ export class Organization implements PluginHost {
         if (caller.kind === "agent" && caller.id !== batch.identity.parentAgentId) throw new ApiError("FORBIDDEN", "Only the batch recipient may inspect completion metadata");
         const items: Array<{index:number;operationId:string;targetAgentId:string|null;status:string;resultAvailable:boolean}> = [];
         const start = Math.min(p.after, batch.memberOperationIds.length);
-        const make = (list: typeof items, next: number | null) => ({ batchId: p.batchId, state: batch.state, total: batch.memberOperationIds.length, after: start, next, items: list, jsonl: list.map(item => JSON.stringify(item)).join("\n") });
+        const make = (list: typeof items, next: number | null) => ({ batchId: p.batchId, state: batch.dispatchSuppressed ? "suppressed" : batch.state, ...(batch.dispatchSuppressed ? { suppressionReason: batch.suppressionReason } : {}), total: batch.memberOperationIds.length, after: start, next, items: list });
         for (let index = start; index < Math.min(batch.memberOperationIds.length, start + p.limit); index++) {
           const operationId = batch.memberOperationIds[index], op = this.operations.get(operationId);
           const item = { index, operationId, targetAgentId: op?.agentId ?? null, status: op?.status ?? batch.memberStatuses?.[operationId] ?? "missing-or-pruned", resultAvailable: !!op };

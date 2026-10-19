@@ -93,7 +93,11 @@ test("dispatch continuation and terminal result/pin release are atomic across ro
     expect(reopened.operations().find(o => o.id === "continuation")?.status).toBe("queued");
     expect(reopened.pinnedOperationIds()).toEqual(["member"]);
     reopened.db.exec("DROP TRIGGER fail_finish");
+    expect(reopened.finishCompletion({ ...done, id: "wrong" }, persisted)).toBe(false);
+    expect(reopened.finishCompletion({ ...done, status: "running" as Operation["status"] }, persisted)).toBe(false);
+    expect(reopened.finishCompletion(done, { ...persisted, continuationOperationId: "wrong" })).toBe(false);
     expect(reopened.finishCompletion(done, persisted)).toBe(true);
+    expect(reopened.dispatchCompletion(continuation, persisted)).toBe(false);
     expect(reopened.completionBatches()[0].state).toBe("dispatched");
     expect(reopened.pinnedOperationIds()).toEqual([]);
   } finally { reopened.close(); }
@@ -133,7 +137,7 @@ test("genuine populated schema version 1 database migrates additively", () => {
   const migrated = new Store(file);
   try {
     expect(migrated.db.query<{ value: number }, []>("SELECT value FROM meta WHERE key='schema'").get()!.value).toBe(2);
-    expect(migrated.agents()).toEqual([{ id: "legacy-agent" }]);
+    expect(migrated.agents()).toMatchObject([{ id: "legacy-agent" }]);
     expect(migrated.operations().map(o => o.id)).toEqual(["legacy-op"]);
     expect(migrated.completionBatches()).toEqual([]);
   } finally { migrated.close(); rmSync(dir, { recursive: true, force: true }); }

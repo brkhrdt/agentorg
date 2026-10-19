@@ -118,7 +118,8 @@ export class Store {
       const row = this.db.query<{ data: string }, typeof key>("SELECT data FROM completion_batches WHERE parent_agent_id=? AND parent_session_id=? AND root_operation_id=?").get(...key);
       if (!row) return false;
       const current = JSON.parse(row.data) as CompletionBatch;
-      if (current.state !== "ready") return current.continuationOperationId === op.id;
+      if (current.state === "dispatching") return current.continuationOperationId === op.id;
+      if (current.state !== "ready" || op.status !== "queued") return false;
       this.saveOperation(op);
       batch.state = "dispatching";
       batch.continuationOperationId = op.id;
@@ -130,9 +131,16 @@ export class Store {
   finishCompletion(op: Operation, batch: CompletionBatch): boolean {
     const key = [batch.identity.parentAgentId, batch.identity.parentSessionId, batch.identity.rootOperationId];
     return this.db.transaction(() => {
+      const row = this.db.query<{ data: string }, typeof key>("SELECT data FROM completion_batches WHERE parent_agent_id=? AND parent_session_id=? AND root_operation_id=?").get(...key);
+      if (!row) return false;
+      const current = JSON.parse(row.data) as CompletionBatch;
+      const persisted = this.db.query<{ data: string }, [string]>("SELECT data FROM operations WHERE id=?").get(op.id);
+      if (current.state !== "dispatching" || current.continuationOperationId !== op.id || batch.continuationOperationId !== op.id || !persisted || !["completed", "failed", "stopped"].includes(op.status)) return false;
+      const saved = JSON.parse(persisted.data) as Operation;
+      if (saved.status !== "running" && saved.status !== "queued") return false;
       this.saveOperation(op);
-      batch.state = "dispatched";
-      this.setCompletionBatch(batch);
+      current.state = "dispatched";
+      this.setCompletionBatch(current);
       this.db.query("DELETE FROM result_pins WHERE operation_id IN (SELECT operation_id FROM completion_members WHERE parent_agent_id=? AND parent_session_id=? AND root_operation_id=?)").run(...key);
       return true;
     })();

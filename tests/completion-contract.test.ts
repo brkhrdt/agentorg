@@ -6,7 +6,7 @@ test("prompt provenance is optional and legacy operations remain unattributed", 
   const legacy = { id: "old" } as Pick<Operation, "promptProvenance">;
   expect(classifyPrompt(legacy)).toEqual({ kind: "legacy-or-unattributed" });
   const operation = { promptProvenance: { kind: "parent-completion", parentOperationId: "p", parentAgentId: "a", parentSessionId: "s", parentGeneration: "g" } } as Pick<Operation, "promptProvenance">;
-  expect(classifyPrompt(operation)).toEqual({ kind: "parent-completion", provenance: operation.promptProvenance });
+  expect(classifyPrompt(operation)).toEqual({ kind: "parent-completion", provenance: operation.promptProvenance! });
 });
 
 test("batch readiness requires nonempty distinct members and can be revoked before dispatch", () => {
