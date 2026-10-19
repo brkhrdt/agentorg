@@ -375,6 +375,22 @@ test("ancestor completion readiness waits for nested batches to become terminal"
   await client.wait(activeA);
 });
 
+test("queued recursive lifecycle work on an ancestor blocks delegated readiness", async () => {
+  const { client, server } = await setup();
+  const ancestor = await create(client), target = await create(client, ancestor.id);
+  const member: Operation = { id: crypto.randomUUID(), type: "agent.prompt", agentId: target.id, input: {}, caller: { kind: "server", id: "test" }, status: "completed", createdAt: now(), completedAt: now() };
+  const identity = { parentAgentId: ancestor.id, parentSessionId: ancestor.sessionId!, rootOperationId: crypto.randomUUID() };
+  expect(server.organization.store.admitCompletionOperation(member, identity, [target.id], 100)).toBe(true);
+  server.organization.operations.set(member.id, member);
+  const pending: Operation = { id: crypto.randomUUID(), type: "agent.restart_subtree", agentId: ancestor.id, input: {}, caller: { kind: "server", id: "test" }, status: "queued", createdAt: now() };
+  server.organization.operations.set(pending.id, pending);
+  (server.organization as any).reconcileCompletionBatches();
+  expect(server.organization.store.completionBatches()[0]?.state).toBe("collecting");
+  pending.status = "completed";
+  (server.organization as any).reconcileCompletionBatches();
+  expect(server.organization.store.completionBatches()[0]?.state).toBe("ready");
+});
+
 test("enrolled members record failed, cancelled, superseded, and stopped terminal outcomes", async () => {
   const { client, server } = await setup();
   const root = await create(client);

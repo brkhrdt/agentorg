@@ -568,8 +568,9 @@ export class Organization implements PluginHost {
     }
     // Lifecycle work can create, restart, or otherwise make a relevant subtree busy.
     for (const op of this.operations.values()) {
-      if (terminal(op) || op.type === "agent.prompt") continue;
-      if (op.agentId && relevant.some(agent => this.isDescendant(op.agentId!, agent.id))) return false;
+      if (terminal(op) || op.type === "agent.prompt" || !op.agentId) continue;
+      const recursive = op.type === "agent.restart_subtree" || op.type === "agent.remove";
+      if (roots.some(root => this.isDescendant(op.agentId!, root.id) || recursive && this.isDescendant(root.id, op.agentId!))) return false;
     }
     return true;
   }
