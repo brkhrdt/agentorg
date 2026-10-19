@@ -586,9 +586,11 @@ export class Organization implements PluginHost {
     const op: Operation = { id: crypto.randomUUID(), type: "agent.prompt", agentId: id, input: { text: prompt, queue: true }, caller: { kind: "server", id: "server" }, status: "queued", createdAt: now() };
     if (!this.store.dispatchCompletion(op, batch)) return;
     this.operations.set(op.id, op);
-    this.emit("operation.changed", op, id);
+    // Durable dispatch admission is the source of truth. Schedule it before best-effort
+    // diagnostics so a failed event write cannot strand a persisted queued continuation.
     rt.queue.push(op);
-    this.emit("completion.dispatch_started", { batchId: batch.identity.rootOperationId, operationCount: outcomes.length }, id);
+    try { this.emit("operation.changed", op, id); } catch {}
+    try { this.emit("completion.dispatch_started", { batchId: batch.identity.rootOperationId, operationCount: outcomes.length }, id); } catch {}
     this.pump();
   }
   private agentDepth(id: string): number {
@@ -1438,9 +1440,12 @@ export class Organization implements PluginHost {
       active++;
       op.status = "running";
       op.startedAt = now();
-      this.saveOp(op);
-      this.state(a, "running");
-      this.emit("prompt.started", { operationId: op.id }, id, rt.generation);
+      // Persist/schedule the admitted prompt independently of event-store health.
+      this.store.saveOperation(op);
+      try { this.emit("operation.changed", op, op.agentId ?? undefined); } catch {}
+      for (const removed of this.store.pruneTerminalOperations(this.limits.maxOperations)) this.operations.delete(removed);
+      try { this.state(a, "running"); } catch {}
+      try { this.emit("prompt.started", { operationId: op.id }, id, rt.generation); } catch {}
       const work = rt.process.prompt((op.input as { text: string }).text);
       rt.active = { op, work, cancelling: false };
       void work.then(
@@ -1497,13 +1502,16 @@ export class Organization implements PluginHost {
     }
     rt.active = undefined;
     this.cancelPermissions(id);
-    this.emit(
-      "prompt.finished",
-      { operationId: op.id, status: op.status },
-      id,
-      rt.generation,
-    );
-    this.state(this.agent(id), rt.queue.length ? "waiting" : "idle");
+    // Persist runtime readiness before emitting diagnostics. A prompt.finished event is
+    // observability only and must not block idle state or batch reconciliation.
+    try {
+      this.state(this.agent(id), rt.queue.length ? "waiting" : "idle");
+    } catch {
+      // The terminal operation is already durable; retry only the remaining runtime
+      // cleanup rather than re-entering ACP completion (whose terminal guard will return).
+      setTimeout(() => { if (!this.closing && this.runtimes.get(id) === rt && !rt.active) void this.serialize(() => this.state(this.agent(id), rt.queue.length ? "waiting" : "idle")); }, 25);
+    }
+    try { this.emit("prompt.finished", { operationId: op.id, status: op.status }, id, rt.generation); } catch {}
   }
   private cancelPrompt(a: AgentRecord, rt: Runtime, active: ActivePrompt) {
     if (active.cancelling) return;

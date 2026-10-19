@@ -725,6 +725,20 @@ test("diagnostic event-store failure cannot strand ACP child completion or conti
   expect(server.organization.store.pinnedOperationIds()).toHaveLength(0);
 });
 
+test("prompt.finished and continuation operation.changed event failures cannot strand completion work", async () => {
+  const { client, server } = await setup();
+  const root = await create(client);
+  server.organization.store.db.exec(`CREATE TRIGGER reject_completion_diagnostics BEFORE INSERT ON events WHEN json_extract(NEW.data, '$.type')='prompt.finished' OR (json_extract(NEW.data, '$.type')='operation.changed' AND json_extract(NEW.data, '$.data.caller.id')='server' AND json_extract(NEW.data, '$.data.input.text') LIKE 'Review child completion batch%') BEGIN SELECT RAISE(ABORT, 'injected completion event failure'); END`);
+  const parent = await client.wait(await prompt(client, root.id, "delegate-return"));
+  expect(parent.status).toBe("completed");
+  await until(() => (server.organization.agents.get(root.id)?.state === "idle") && server.organization.store.completionBatches().some(batch => batch.identity.rootOperationId === parent.id && batch.state === "dispatched"));
+  const batch = server.organization.store.completionBatches().find(item => item.identity.rootOperationId === parent.id)!;
+  expect(batch.continuationOperationId).toBeTruthy();
+  expect(server.organization.operations.get(batch.continuationOperationId!)?.status).toBe("completed");
+  expect(server.organization.store.pinnedOperationIds()).toHaveLength(0);
+  expect(server.organization.store.history(0, 10000).events.filter(event => event.type === "completion.dispatch_started" && (event.data as any).batchId === parent.id)).toHaveLength(1);
+});
+
 test("completion storage failure leaves queued and active prompts untouched", async () => {
   const { client, server } = await setup();
   const root = await create(client);
