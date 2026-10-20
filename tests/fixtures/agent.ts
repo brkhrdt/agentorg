@@ -1,11 +1,50 @@
 import * as acp from "@agentclientprotocol/sdk";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { Readable, Writable } from "node:stream";
+import { existsSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { OrganizationClient } from "../../src/client.ts";
 import type { AgentRecord, Operation } from "../../src/types.ts";
 
 let sessionId: string = crypto.randomUUID();
 let cancelled = false;
+let mcpServers: acp.McpServer[] = [];
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+async function connectBridge() {
+  const bridge = mcpServers[0] as any;
+  const environment = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+  const transport = new StdioClientTransport({ command: bridge.command, args: bridge.args, env: { ...environment, ...Object.fromEntries((bridge.env ?? []).map((entry: { name: string; value: string }) => [entry.name, entry.value])) } });
+  const client = new Client({ name: "completion-fixture", version: "1" });
+  await client.connect(transport);
+  return client;
+}
+async function inspectCompletionBatch(batchId: string) {
+  const client = await connectBridge();
+  try {
+    const call = async (name: string, args: Record<string, unknown>) => {
+      const result = await client.callTool({ name, arguments: args });
+      if (result.isError) throw new Error(`MCP ${name}: ${(result.content as any[])[0]?.text ?? "failed"}`);
+      return JSON.parse((result.content as any[])[0]!.text as string);
+    };
+    let after = 0;
+    const members: Array<{ operationId: string; status: string; resultAvailable: boolean; result: unknown }> = [];
+    for (;;) {
+      const page = await call("completion_get", { batchId, after, limit: 2 });
+      const items = page.items ?? page.i ?? [];
+      for (const item of items) {
+        const operationId = item.operationId ?? item.o;
+        const query = await call("operation_get", { operationId, resultOnly: true });
+        members.push({ operationId, status: query.s, resultAvailable: query.a, result: query.r });
+      }
+      const next = page.next ?? page.n;
+      if (next === null || next === undefined) break;
+      after = next;
+    }
+    const directory = process.env.COMPLETION_QUERY_DIR ?? process.env.COMPLETION_BARRIER_DIR;
+    if (directory) writeFileSync(join(directory, `completion-query-${batchId}.json`), JSON.stringify({ batchId, members }));
+  } finally { await client.close(); }
+}
 acp
   .agent({ name: "deterministic-fixture" })
   .onRequest("initialize", async () => {
@@ -15,9 +54,13 @@ acp
       agentCapabilities: { loadSession: true },
     };
   })
-  .onRequest("session/new", () => ({ sessionId }))
+  .onRequest("session/new", (ctx) => {
+    mcpServers = ctx.params.mcpServers ?? [];
+    return { sessionId };
+  })
   .onRequest("session/load", (ctx) => {
     sessionId = ctx.params.sessionId;
+    mcpServers = ctx.params.mcpServers ?? [];
     return {};
   })
   .onRequest("session/prompt", async (ctx) => {
@@ -25,6 +68,21 @@ acp
     const text = ctx.params.prompt
       .map((b) => (b.type === "text" ? b.text : ""))
       .join("");
+    if (text.startsWith("Review child completion batch ")) {
+      const batchId = text.match(/Review child completion batch ([^\\.\\n]+)/)?.[1];
+      if (batchId) {
+        if (process.env.COMPLETION_BARRIER_DIR) {
+          writeFileSync(join(process.env.COMPLETION_BARRIER_DIR, `continuation-${batchId}.started`), "started");
+          while (!existsSync(join(process.env.COMPLETION_BARRIER_DIR, `continuation-${batchId}.release`))) await delay(10);
+        }
+        if (process.env.COMPLETION_FAIL === "1") throw new Error("fixture continuation failure");
+        if (mcpServers[0]) await inspectCompletionBatch(batchId);
+      }
+    }
+    if (text === "sibling-barrier" && process.env.SIBLING_BARRIER_DIR) {
+      writeFileSync(join(process.env.SIBLING_BARRIER_DIR, "sibling.started"), "started");
+      while (!existsSync(join(process.env.SIBLING_BARRIER_DIR, "sibling.release"))) await delay(10);
+    }
     if (text === "crash") process.exit(2);
     if (text === "permission") {
       const result = await ctx.client.request("session/request_permission", {
@@ -51,7 +109,7 @@ acp
       if (cancelled && !process.env.IGNORE_CANCEL) break;
       await delay(10);
     }
-    if (text === "delegate") {
+    if (text === "delegate" || text === "delegate-return") {
       const client = await OrganizationClient.connect(
         process.env.ORG_SOCKET!,
         process.env.ORG_TOKEN!,
@@ -76,20 +134,40 @@ acp
             throw new Error(JSON.stringify(op.error));
           children.push((op.result as AgentRecord).id);
         }
-        await Promise.all(
-          children.map(async (agentId, i) => {
-            const op = await call("descendant_prompt", {
-              agentId,
-              text: i ? "tests done" : "code done",
-            });
-            const done = await client.wait(op);
-            if (done.status !== "completed")
-              throw new Error(JSON.stringify(done.error));
-          }),
-        );
+        const issued = await Promise.all(children.map((agentId, i) => call("descendant_prompt", {
+          agentId, text: i ? "tests done" : "code done",
+        })));
+        if (text === "delegate") await Promise.all(issued.map(async (op: Operation) => {
+          const done = await client.wait(op);
+          if (done.status !== "completed") throw new Error(JSON.stringify(done.error));
+        }));
       } finally {
         client.close();
       }
+    }
+    if (text === "chain-root" || text === "chain-mid") {
+      const mcp = await connectBridge();
+      const call = async (name: string, args: Record<string, unknown>) => {
+        try {
+          const result = await mcp.callTool({ name, arguments: args });
+          if (result.isError) throw new Error(`MCP ${name}: ${(result.content as any[])[0]?.text}`);
+          return JSON.parse((result.content as any[])[0]!.text as string);
+        } catch (error) { throw new Error(`SDK stdio MCP ${name} failed: ${error instanceof Error ? error.message : String(error)}`); }
+      };
+      try {
+        const names = text === "chain-root" ? ["middle"] : ["leaf", "failing-leaf"];
+        const targetIds: string[] = [];
+        for (const name of names) {
+          const childOp = await call("child_create", { name, settings: { harness: "fixture", env: { COMPLETION_QUERY_DIR: process.env.COMPLETION_QUERY_DIR } } });
+          const childDone = await call("operation_wait", { operationId: childOp.id, waitMs: 5000 });
+          if (childDone.status !== "completed") throw new Error(JSON.stringify(childDone.error));
+          targetIds.push(childDone.result.id);
+        }
+        for (const [index, targetId] of targetIds.entries()) {
+          const promptOp = await call("descendant_prompt", { agentId: targetId, text: text === "chain-root" ? "chain-mid" : index === 0 ? "chain-leaf" : "crash" });
+          if (!promptOp.id) throw new Error("descendant_prompt returned no operation id");
+        }
+      } finally { await mcp.close(); }
     }
     await ctx.client.notify("session/update", {
       sessionId,

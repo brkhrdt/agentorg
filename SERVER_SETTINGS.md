@@ -72,12 +72,24 @@ Field effects:
   until the **server** restarts. Resetting a pending change back to the effective
   value clears the indicator. There is no server/agent restart API in this view.
 
-The initial `core` group exposes the existing runtime limits. `maxLineBytes`
-requires restart because client and ACP parsers capture it at creation. Other
-limits apply at subsequent checks. Lowering count limits does not delete agents,
-stop existing processes, or cancel active prompts; admissions are constrained.
-`maxEvents` defaults to **0 (unlimited durable history)**. A positive value permanently prunes older events on subsequent event writes; changing the setting alone does not prune. Existing persisted overrides are honored, so explicitly set/reset this field to 0 to disable a prior limit. Terminal-operation retention is independent. TUI history caches have separate client-only limits; cache eviction never deletes database records. No save
-changes any agent's revision or generation or automatically restarts agents.
+The initial `core` group exposes runtime limits, including
+`maxPendingCompletionOperations` (default **1024**), a global server-wide cap on
+pending parent-completion operation memberships. Pinned completed operations
+continue consuming this cap until the associated batch is delivered, explicitly
+cancelled/superseded, or suppressed as undeliverable. Lowering the cap affects
+future admission only; it does not cancel or discard existing obligations or
+release their pins. `maxLineBytes` requires restart because client and ACP
+parsers capture it at creation. Other limits apply at subsequent checks.
+Lowering count limits does not delete agents, stop existing processes, or cancel
+active prompts; admissions are constrained. `maxEvents` defaults to **0
+(unlimited durable history)**. A positive value permanently prunes older events
+on subsequent event writes; changing the setting alone does not prune. Existing
+persisted overrides are honored, so explicitly set/reset this field to 0 to
+disable a prior limit. Terminal-operation retention is independent, except
+completion-pinned original operations are protected while their obligation
+remains pending. TUI history caches have separate client-only limits; cache
+eviction never deletes database records. No save changes any agent's revision
+or generation or automatically restarts agents.
 
 ## Rendering defaults
 

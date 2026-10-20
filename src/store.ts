@@ -4,6 +4,7 @@ import { dirname } from "node:path";
 import { ApiError, bounded, type AgentRecord, type Operation, type ServerEvent } from "./types.ts";
 import type { EventRendering } from "./rendering.ts";
 import type { ServerSettingsRecord } from "./server-settings.ts";
+import type { CompletionBatch, CompletionBatchIdentity } from "./completion-contract.ts";
 
 /** Records are durable; only bounded event and terminal-operation history is pruned. */
 export class Store {
@@ -20,6 +21,14 @@ export class Store {
       CREATE TABLE IF NOT EXISTS server_settings (namespace TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY, agent_id TEXT, data TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS events_agent_seq ON events (agent_id, seq);
+      CREATE TABLE IF NOT EXISTS completion_batches (
+        parent_agent_id TEXT NOT NULL, parent_session_id TEXT NOT NULL, root_operation_id TEXT NOT NULL,
+        data TEXT NOT NULL, PRIMARY KEY(parent_agent_id, parent_session_id, root_operation_id));
+      CREATE TABLE IF NOT EXISTS completion_members (
+        parent_agent_id TEXT NOT NULL, parent_session_id TEXT NOT NULL, root_operation_id TEXT NOT NULL,
+        operation_id TEXT NOT NULL UNIQUE, PRIMARY KEY(parent_agent_id, parent_session_id, root_operation_id, operation_id),
+        FOREIGN KEY(parent_agent_id, parent_session_id, root_operation_id) REFERENCES completion_batches(parent_agent_id, parent_session_id, root_operation_id));
+      CREATE TABLE IF NOT EXISTS result_pins (operation_id TEXT PRIMARY KEY);
       CREATE INDEX IF NOT EXISTS events_tool_context ON events (
         agent_id, json_extract(data, '$.generation'), json_extract(data, '$.data.toolCallId'), seq
       ) WHERE json_extract(data, '$.type') IN ('tool.call', 'tool.update', 'tool.result')
@@ -30,8 +39,8 @@ export class Store {
     const version = this.db
       .query<{ value: number }, []>("SELECT value FROM meta WHERE key='schema'")
       .get()!.value;
-    if (version !== 1)
-      throw new Error(`Unsupported database schema ${version}`);
+    if (version === 1) this.db.query("UPDATE meta SET value=2 WHERE key='schema'").run();
+    else if (version !== 2) throw new Error(`Unsupported database schema ${version}`);
   }
   serverSettings(namespace: string): ServerSettingsRecord | undefined {
     const row = this.db.query<{ data: string }, [string]>("SELECT data FROM server_settings WHERE namespace=?").get(namespace);
@@ -67,8 +76,168 @@ export class Store {
       .query("INSERT OR REPLACE INTO operations VALUES (?, ?)")
       .run(op.id, JSON.stringify(op));
   }
+  /** Atomically transition an admitted queued operation to running and prune terminal history. */
+  startOperation(op: Operation, maxOperations: number): string[] {
+    return this.db.transaction(() => {
+      this.saveOperation(op);
+      const pinned = new Set(this.pinnedOperationIds());
+      const terminalRows = this.operations().filter(item => ["completed", "failed", "stopped", "interrupted"].includes(item.status));
+      const remove = terminalRows.filter(item => !pinned.has(item.id)).slice(0, Math.max(0, terminalRows.length - maxOperations));
+      for (const item of remove) this.deleteOperation(item.id);
+      return remove.map(item => item.id);
+    })();
+  }
+  /** Commit terminal state and completion membership together before mutating live operations. */
+  finishOperation(op: Operation): boolean {
+    return this.db.transaction(() => {
+      this.saveOperation(op);
+      const row = this.db.query<{ data: string }, [string]>("SELECT data FROM completion_batches WHERE EXISTS (SELECT 1 FROM completion_members WHERE completion_members.parent_agent_id=completion_batches.parent_agent_id AND completion_members.parent_session_id=completion_batches.parent_session_id AND completion_members.root_operation_id=completion_batches.root_operation_id AND completion_members.operation_id=?)").get(op.id);
+      if (row) {
+        const batch = JSON.parse(row.data) as CompletionBatch;
+        batch.memberStatuses = { ...batch.memberStatuses, [op.id]: op.status };
+        this.setCompletionBatch(batch);
+      }
+      return true;
+    })();
+  }
   deleteOperation(id: string) {
     this.db.query("DELETE FROM operations WHERE id=?").run(id);
+  }
+  /** Atomically admit a trusted completion member, recording the operation, membership, and retention pin.
+   * Rejection is read-only: callers can safely perform this before superseding existing work. */
+  admitCompletionOperation(op: Operation, identity: CompletionBatchIdentity, relevantRootAgentIds: string[], maxPending: number): boolean {
+    if (!Number.isSafeInteger(maxPending) || maxPending < 1) return false;
+    return this.db.transaction(() => {
+      // Capacity represents outstanding completion obligations, not merely running work:
+      // a terminal result remains retained and consumes capacity until its pin is released.
+      const pending = this.db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM result_pins").get()!.count;
+      if (pending >= maxPending || this.db.query("SELECT 1 FROM operations WHERE id=?").get(op.id)) return false;
+      const key: [string, string, string] = [identity.parentAgentId, identity.parentSessionId, identity.rootOperationId];
+      const existing = this.db.query<{ data: string }, typeof key>(`SELECT data FROM completion_batches WHERE parent_agent_id=? AND parent_session_id=? AND root_operation_id=?`).get(...key);
+      if (existing) {
+        const state = (JSON.parse(existing.data) as CompletionBatch).state;
+        // A member joining a ready batch atomically revokes readiness. Dispatching or
+        // terminal batches cannot accept members.
+        if (state !== "collecting" && state !== "ready") return false;
+      }
+      if (!existing) {
+        const batch: CompletionBatch = { identity, state: "collecting", memberOperationIds: [], relevantRootAgentIds: [...new Set(relevantRootAgentIds)] };
+        this.db.query("INSERT INTO completion_batches VALUES (?, ?, ?, ?)").run(...key, JSON.stringify(batch));
+      }
+      this.saveOperation(op);
+      this.db.query("INSERT INTO completion_members VALUES (?, ?, ?, ?)").run(...key, op.id);
+      this.db.query("INSERT INTO result_pins VALUES (?)").run(op.id);
+      const row = this.db.query<{ data: string }, typeof key>("SELECT data FROM completion_batches WHERE parent_agent_id=? AND parent_session_id=? AND root_operation_id=?").get(...key)!;
+      const batch = JSON.parse(row.data) as CompletionBatch;
+      batch.memberOperationIds.push(op.id);
+      batch.memberStatuses = { ...batch.memberStatuses, [op.id]: op.status };
+      batch.state = "collecting";
+      batch.relevantRootAgentIds = [...new Set([...batch.relevantRootAgentIds, ...relevantRootAgentIds])];
+      this.db.query("UPDATE completion_batches SET data=? WHERE parent_agent_id=? AND parent_session_id=? AND root_operation_id=?").run(JSON.stringify(batch), ...key);
+      return true;
+    })();
+  }
+  /** Persist the continuation and dispatch marker in one transaction (safe to retry). */
+  dispatchCompletion(op: Operation, batch: CompletionBatch): boolean {
+    const key = [batch.identity.parentAgentId, batch.identity.parentSessionId, batch.identity.rootOperationId];
+    return this.db.transaction(() => {
+      const row = this.db.query<{ data: string }, typeof key>("SELECT data FROM completion_batches WHERE parent_agent_id=? AND parent_session_id=? AND root_operation_id=?").get(...key);
+      if (!row) return false;
+      const current = JSON.parse(row.data) as CompletionBatch;
+      if (current.state === "dispatching") {
+        const persisted = this.db.query<{ data: string }, [string]>("SELECT data FROM operations WHERE id=?").get(op.id);
+        if (current.continuationOperationId !== op.id || !persisted) return false;
+        const saved = JSON.parse(persisted.data) as Operation;
+        return ["queued", "running"].includes(saved.status) && op.status === saved.status;
+      }
+      if (current.state !== "ready" || op.status !== "queued") return false;
+      this.saveOperation(op);
+      batch.state = "dispatching";
+      delete batch.deliveryResolution;
+      batch.continuationOperationId = op.id;
+      this.setCompletionBatch(batch);
+      return true;
+    })();
+  }
+  /** Atomically persist terminal continuation state and release its member pins. */
+  finishCompletion(op: Operation, batch: CompletionBatch): boolean {
+    const key = [batch.identity.parentAgentId, batch.identity.parentSessionId, batch.identity.rootOperationId];
+    return this.db.transaction(() => {
+      const row = this.db.query<{ data: string }, typeof key>("SELECT data FROM completion_batches WHERE parent_agent_id=? AND parent_session_id=? AND root_operation_id=?").get(...key);
+      if (!row) return false;
+      const current = JSON.parse(row.data) as CompletionBatch;
+      const persisted = this.db.query<{ data: string }, [string]>("SELECT data FROM operations WHERE id=?").get(op.id);
+      if (current.state !== "dispatching" || current.continuationOperationId !== op.id || batch.continuationOperationId !== op.id || !persisted || !["completed", "failed", "stopped"].includes(op.status)) return false;
+      const saved = JSON.parse(persisted.data) as Operation;
+      if (saved.status !== "running" && saved.status !== "queued") return false;
+      this.saveOperation(op);
+      current.state = "dispatched";
+      current.deliveryResolution = op.status === "completed" ? "delivered" : op.error?.code === "SUPERSEDED" ? "superseded" : op.status === "failed" ? "recipient-failed" : "cancelled";
+      this.setCompletionBatch(current);
+      this.db.query("DELETE FROM result_pins WHERE operation_id IN (SELECT operation_id FROM completion_members WHERE parent_agent_id=? AND parent_session_id=? AND root_operation_id=?)").run(...key);
+      return true;
+    })();
+  }
+  /** Terminalize an interrupted in-flight continuation while preserving its logical batch and pins for retry. */
+  interruptCompletion(op: Operation, batch: CompletionBatch, reason: NonNullable<CompletionBatch["interruptionReason"]> = "server-recovery"): boolean {
+    const key = [batch.identity.parentAgentId, batch.identity.parentSessionId, batch.identity.rootOperationId];
+    return this.db.transaction(() => {
+      const row = this.db.query<{ data: string }, typeof key>("SELECT data FROM completion_batches WHERE parent_agent_id=? AND parent_session_id=? AND root_operation_id=?").get(...key);
+      const persisted = this.db.query<{ data: string }, [string]>("SELECT data FROM operations WHERE id=?").get(op.id);
+      if (!row || !persisted) return false;
+      const current = JSON.parse(row.data) as CompletionBatch;
+      if (current.state !== "dispatching" || current.continuationOperationId !== op.id || op.status !== "interrupted") return false;
+      this.saveOperation(op);
+      current.state = "ready";
+      current.deliveryResolution = "interrupted";
+      current.interruptionReason = reason;
+      delete current.continuationOperationId;
+      this.setCompletionBatch(current);
+      return true;
+    })();
+  }
+  completionBatches(): CompletionBatch[] {
+    return this.db.query<{ data: string }, []>("SELECT data FROM completion_batches ORDER BY rowid").all().map(row => JSON.parse(row.data));
+  }
+  completionBatchForOperation(operationId: string): CompletionBatch | undefined {
+    return this.completionBatches().find(batch => batch.continuationOperationId === operationId);
+  }
+  updateCompletionMemberStatus(operationId: string, status: Operation["status"]) {
+    const row = this.db.query<{ data: string }, [string]>("SELECT data FROM completion_batches WHERE EXISTS (SELECT 1 FROM completion_members WHERE completion_members.parent_agent_id=completion_batches.parent_agent_id AND completion_members.parent_session_id=completion_batches.parent_session_id AND completion_members.root_operation_id=completion_batches.root_operation_id AND completion_members.operation_id=?)").get(operationId);
+    if (!row) return;
+    const batch = JSON.parse(row.data) as CompletionBatch;
+    batch.memberStatuses = { ...batch.memberStatuses, [operationId]: status };
+    this.setCompletionBatch(batch);
+  }
+  suppressCompletion(batch: CompletionBatch, reason: string) {
+    const key = [batch.identity.parentAgentId, batch.identity.parentSessionId, batch.identity.rootOperationId];
+    this.db.transaction(() => {
+      batch.state = "dispatched";
+      batch.dispatchSuppressed = true;
+      batch.suppressionReason = reason;
+      this.setCompletionBatch(batch);
+      this.db.query("DELETE FROM result_pins WHERE operation_id IN (SELECT operation_id FROM completion_members WHERE parent_agent_id=? AND parent_session_id=? AND root_operation_id=?)").run(...key);
+    })();
+  }
+  setCompletionBatch(batch: CompletionBatch) {
+    const { parentAgentId, parentSessionId, rootOperationId } = batch.identity;
+    this.db.query("UPDATE completion_batches SET data=? WHERE parent_agent_id=? AND parent_session_id=? AND root_operation_id=?").run(JSON.stringify(batch), parentAgentId, parentSessionId, rootOperationId);
+  }
+  releaseCompletionPins(identity: CompletionBatchIdentity) {
+    this.db.transaction(() => {
+      this.db.query("DELETE FROM result_pins WHERE operation_id IN (SELECT operation_id FROM completion_members WHERE parent_agent_id=? AND parent_session_id=? AND root_operation_id=?)").run(identity.parentAgentId, identity.parentSessionId, identity.rootOperationId);
+    })();
+  }
+  pinnedOperationIds(): string[] {
+    return this.db.query<{ operation_id: string }, []>("SELECT operation_id FROM result_pins").all().map(row => row.operation_id);
+  }
+  pruneTerminalOperations(maxOperations: number): string[] {
+    const pinned = new Set(this.pinnedOperationIds());
+    const terminalRows = this.operations().filter(op => ["completed", "failed", "stopped", "interrupted"].includes(op.status));
+    const unpinned = terminalRows.filter(op => !pinned.has(op.id));
+    const remove = unpinned.slice(0, Math.max(0, terminalRows.length - maxOperations));
+    for (const op of remove) this.deleteOperation(op.id);
+    return remove.map(op => op.id);
   }
   event(event: Omit<ServerEvent, "seq">, maxEvents: number): ServerEvent {
     return this.db.transaction(() => {
