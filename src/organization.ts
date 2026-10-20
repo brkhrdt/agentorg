@@ -381,7 +381,7 @@ export class Organization implements PluginHost {
       try { this.pump(); } catch { /* active work has its own retry path */ }
       try {
         this.reconcileAndDispatchCompletionBatches();
-        this.completionRetryAttempts = 0;
+        this.cancelCompletionRetry();
       } catch {
         this.scheduleCompletionRetry();
       }
@@ -576,9 +576,15 @@ export class Organization implements PluginHost {
       this.reconcileCompletionBatches();
     });
   }
+  private cancelCompletionRetry() {
+    if (this.completionRetryTimer) clearTimeout(this.completionRetryTimer);
+    this.completionRetryTimer = undefined;
+    this.completionRetryAttempts = 0;
+  }
   private scheduleCompletionRetry() {
-    if (this.closing || this.completionRetryTimer || this.completionRetryAttempts >= 5) return;
-    const delay = Math.min(1000, 25 * 2 ** this.completionRetryAttempts++);
+    if (this.closing || this.completionRetryTimer) return;
+    const delay = Math.min(1000, 25 * 2 ** this.completionRetryAttempts);
+    this.completionRetryAttempts = Math.min(this.completionRetryAttempts + 1, 6);
     this.completionRetryTimer = setTimeout(() => {
       this.completionRetryTimer = undefined;
       if (this.closing) return;

@@ -801,6 +801,9 @@ test("failed completion dispatch retries after storage recovery and heals serial
   const findBatch = () => store.completionBatches().find(batch => batch.identity.rootOperationId === parent.id)!;
   await until(() => findBatch()?.state === "ready" && attempts > 0);
   expect(findBatch().continuationOperationId).toBeUndefined();
+  await Bun.sleep(1200);
+  expect(findBatch().state).toBe("ready");
+  expect(attempts).toBeGreaterThan(1);
   store.db.exec("DROP TRIGGER reject_completion_dispatch");
   await until(() => findBatch()?.state === "dispatched");
   const batch = findBatch();
