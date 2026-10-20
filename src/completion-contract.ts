@@ -31,6 +31,8 @@ export interface CompletionBatch {
   continuationOperationId?: string;
   dispatchSuppressed?: boolean;
   suppressionReason?: string;
+  deliveryResolution?: "delivered" | "cancelled" | "superseded" | "interrupted" | "recipient-failed";
+  interruptionReason?: "transient-restart" | "settings-restart" | "server-recovery" | "server-shutdown";
 }
 
 export type CompletionBatchAction = "member-added" | "became-ready" | "readiness-revoked" | "dispatch-started" | "dispatch-finished" | "invalidated";

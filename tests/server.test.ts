@@ -436,6 +436,84 @@ test("completion dispatch does not preempt competing parent work and restores ma
   expect(server.organization.operations.get(batch().continuationOperationId!)?.status).toBe("completed");
 });
 
+test("same-session parent restart interrupts in-flight delivery and retries the logical batch once", async () => {
+  const { client, server, dir } = await setup();
+  const root = await create(client, null, { COMPLETION_BARRIER_DIR: dir });
+  const parent = await client.wait(await prompt(client, root.id, "delegate-return"));
+  const batchForParent = () => server.organization.store.completionBatches().find(batch => batch.identity.rootOperationId === parent.id)!;
+  await until(() => batchForParent()?.state === "dispatching");
+  await until(() => existsSync(join(dir, `continuation-${parent.id}.started`)));
+  const batch = batchForParent(), oldId = batch.continuationOperationId!;
+  const oldSession = server.organization.agents.get(root.id)!.sessionId;
+  await client.wait(await client.request("agent.restart", { agentId: root.id }));
+  expect(server.organization.operations.get(oldId)?.status).toBe("interrupted");
+  expect(server.organization.operations.get(oldId)?.error?.code).toBe("INTERRUPTED");
+  expect(server.organization.agents.get(root.id)!.sessionId).toBe(oldSession);
+  await until(() => batchForParent()?.state === "dispatching" && batchForParent().continuationOperationId !== oldId);
+  const retryId = batchForParent().continuationOperationId!;
+  expect(batchForParent().identity.rootOperationId).toBe(parent.id);
+  expect(server.organization.store.pinnedOperationIds()).toHaveLength(batch.memberOperationIds.length);
+  await Bun.write(join(dir, `continuation-${parent.id}.release`), "release");
+  await until(() => batchForParent().state === "dispatched");
+  expect(server.organization.operations.get(retryId)?.status).toBe("completed");
+  expect(server.organization.store.pinnedOperationIds()).toHaveLength(0);
+  await Bun.sleep(50);
+  expect(server.organization.store.completionBatches().find(candidate => candidate.identity.rootOperationId === parent.id)?.continuationOperationId).toBe(retryId);
+  expect(server.organization.store.history(0, 10000).events.filter(event => event.type === "completion.dispatch_started" && (event.data as any).batchId === parent.id)).toHaveLength(2);
+});
+
+test("settings restart preserves the same-session delivery with a durable restart reason", async () => {
+  const { client, server, dir } = await setup();
+  const root = await create(client, null, { COMPLETION_BARRIER_DIR: dir });
+  const parent = await client.wait(await prompt(client, root.id, "delegate-return"));
+  const findBatch = () => server.organization.store.completionBatches().find(batch => batch.identity.rootOperationId === parent.id)!;
+  await until(() => findBatch()?.state === "dispatching");
+  const oldId = findBatch().continuationOperationId!;
+  await until(() => existsSync(join(dir, `continuation-${parent.id}.started`)));
+  const before = server.organization.agents.get(root.id)!;
+  const updated = await client.wait(await client.request("agent.modify", { agentId: root.id, expectedRevision: before.revision, settings: { env: { COMPLETION_BARRIER_DIR: dir, SETTINGS_RESTART: "1" } } }));
+  expect(updated.status).toBe("completed");
+  expect(server.organization.operations.get(oldId)?.status).toBe("interrupted");
+  expect(findBatch().interruptionReason).toBe("settings-restart");
+  expect(server.organization.agents.get(root.id)?.sessionId).toBe(before.sessionId);
+  await until(() => findBatch()?.state === "dispatching" && findBatch().continuationOperationId !== oldId);
+  const retryId = findBatch().continuationOperationId!;
+  await Bun.write(join(dir, `continuation-${parent.id}.release`), "release");
+  await until(() => findBatch().state === "dispatched");
+  expect(server.organization.operations.get(retryId)?.status).toBe("completed");
+  expect(server.organization.store.pinnedOperationIds()).toHaveLength(0);
+});
+
+test("shutdown preserves an interrupted notification through no-recover until explicit restart", async () => {
+  const { client, server, dir } = await setup();
+  const root = await create(client, null, { COMPLETION_BARRIER_DIR: dir });
+  const parent = await client.wait(await prompt(client, root.id, "delegate-return"));
+  const findBatch = () => server.organization.store.completionBatches().find(batch => batch.identity.rootOperationId === parent.id)!;
+  await until(() => findBatch()?.state === "dispatching");
+  const oldId = findBatch().continuationOperationId!;
+  await until(() => existsSync(join(dir, `continuation-${parent.id}.started`)));
+  client.close();
+  await server.close();
+
+  const restarted = await OrganizationServer.start({ dataDir: dir, socketPath: join(dir, "server.sock"), recover: false, plugins: [fixture] });
+  servers.push(restarted);
+  const paused = await OrganizationClient.connect(join(dir, "server.sock"));
+  clients.push(paused);
+  let pausedBatch = restarted.organization.store.completionBatches().find(batch => batch.identity.rootOperationId === parent.id)!;
+  expect(restarted.organization.operations.get(oldId)?.status).toBe("interrupted");
+  expect(pausedBatch.interruptionReason).toBe("server-shutdown");
+  expect(pausedBatch.state).toBe("ready");
+  expect(restarted.organization.store.pinnedOperationIds()).toHaveLength(pausedBatch.memberOperationIds.length);
+  expect([...restarted.organization.operations.values()].filter(operation => operation.input && (operation.input as any).text?.includes(`Review child completion batch ${parent.id}`)).map(operation => operation.id)).toEqual([oldId]);
+  await Bun.write(join(dir, `continuation-${parent.id}.release`), "release");
+  await paused.wait(await paused.request("agent.restart", { agentId: root.id }));
+  await until(() => restarted.organization.store.completionBatches().find(batch => batch.identity.rootOperationId === parent.id)?.state === "dispatched");
+  pausedBatch = restarted.organization.store.completionBatches().find(batch => batch.identity.rootOperationId === parent.id)!;
+  expect(pausedBatch.continuationOperationId).not.toBe(oldId);
+  expect(restarted.organization.operations.get(pausedBatch.continuationOperationId!)?.status).toBe("completed");
+  expect(restarted.organization.store.pinnedOperationIds()).toHaveLength(0);
+});
+
 test("continuation failure and cancellation both terminalize dispatch and release pins", async () => {
   for (const outcome of ["cancel", "fail"] as const) {
     const { client, server, dir } = await setup();
@@ -475,6 +553,21 @@ test("ready completion batch is suppressed after recipient session replacement",
   (server.organization as any).dispatchCompletionBatch(batch);
   expect(server.organization.store.completionBatches().find(item => item.identity.rootOperationId === identity.rootOperationId)).toMatchObject({ state: "dispatched", dispatchSuppressed: true, suppressionReason: "parent-session-replaced" });
   expect(server.organization.store.pinnedOperationIds()).toHaveLength(0);
+});
+
+test("explicit stop and removal durably suppress recipient obligations and release pins", async () => {
+  for (const method of ["agent.stop", "agent.remove", "agent.replace_session"]) {
+    const { client, server } = await setup();
+    const root = await create(client), batchId = crypto.randomUUID();
+    const member: Operation = { id: crypto.randomUUID(), type: "agent.prompt", agentId: root.id, input: {}, caller: { kind: "server", id: "lifecycle-test" }, status: "completed", createdAt: now(), completedAt: now(), result: "kept" };
+    expect(server.organization.store.admitCompletionOperation(member, { parentAgentId: root.id, parentSessionId: root.sessionId!, rootOperationId: batchId }, [root.id], 4)).toBe(true);
+    server.organization.operations.set(member.id, member);
+    const result = await client.wait(await client.request(method, { agentId: root.id }));
+    expect(result.status).toBe("completed");
+    const batch = server.organization.store.completionBatches().find(candidate => candidate.identity.rootOperationId === batchId)!;
+    expect(batch).toMatchObject({ state: "dispatched", dispatchSuppressed: true, suppressionReason: method === "agent.stop" ? "explicit-stop" : method === "agent.remove" ? "recipient-removed" : "session-replaced" });
+    expect(server.organization.store.pinnedOperationIds()).toHaveLength(0);
+  }
 });
 
 test("completion metadata pages retain stable order, compact/expanded shapes, and recipient fencing", async () => {

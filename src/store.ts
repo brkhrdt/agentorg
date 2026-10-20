@@ -79,7 +79,7 @@ export class Store {
     return this.db.transaction(() => {
       this.saveOperation(op);
       const pinned = new Set(this.pinnedOperationIds());
-      const terminalRows = this.operations().filter(item => ["completed", "failed", "stopped"].includes(item.status));
+      const terminalRows = this.operations().filter(item => ["completed", "failed", "stopped", "interrupted"].includes(item.status));
       const remove = terminalRows.filter(item => !pinned.has(item.id)).slice(0, Math.max(0, terminalRows.length - maxOperations));
       for (const item of remove) this.deleteOperation(item.id);
       return remove.map(item => item.id);
@@ -151,6 +151,7 @@ export class Store {
       if (current.state !== "ready" || op.status !== "queued") return false;
       this.saveOperation(op);
       batch.state = "dispatching";
+      delete batch.deliveryResolution;
       batch.continuationOperationId = op.id;
       this.setCompletionBatch(batch);
       return true;
@@ -169,13 +170,35 @@ export class Store {
       if (saved.status !== "running" && saved.status !== "queued") return false;
       this.saveOperation(op);
       current.state = "dispatched";
+      current.deliveryResolution = op.status === "completed" ? "delivered" : op.error?.code === "SUPERSEDED" ? "superseded" : op.status === "failed" ? "recipient-failed" : "cancelled";
       this.setCompletionBatch(current);
       this.db.query("DELETE FROM result_pins WHERE operation_id IN (SELECT operation_id FROM completion_members WHERE parent_agent_id=? AND parent_session_id=? AND root_operation_id=?)").run(...key);
       return true;
     })();
   }
+  /** Terminalize an interrupted in-flight continuation while preserving its logical batch and pins for retry. */
+  interruptCompletion(op: Operation, batch: CompletionBatch, reason: NonNullable<CompletionBatch["interruptionReason"]> = "server-recovery"): boolean {
+    const key = [batch.identity.parentAgentId, batch.identity.parentSessionId, batch.identity.rootOperationId];
+    return this.db.transaction(() => {
+      const row = this.db.query<{ data: string }, typeof key>("SELECT data FROM completion_batches WHERE parent_agent_id=? AND parent_session_id=? AND root_operation_id=?").get(...key);
+      const persisted = this.db.query<{ data: string }, [string]>("SELECT data FROM operations WHERE id=?").get(op.id);
+      if (!row || !persisted) return false;
+      const current = JSON.parse(row.data) as CompletionBatch;
+      if (current.state !== "dispatching" || current.continuationOperationId !== op.id || op.status !== "interrupted") return false;
+      this.saveOperation(op);
+      current.state = "ready";
+      current.deliveryResolution = "interrupted";
+      current.interruptionReason = reason;
+      delete current.continuationOperationId;
+      this.setCompletionBatch(current);
+      return true;
+    })();
+  }
   completionBatches(): CompletionBatch[] {
     return this.db.query<{ data: string }, []>("SELECT data FROM completion_batches ORDER BY rowid").all().map(row => JSON.parse(row.data));
+  }
+  completionBatchForOperation(operationId: string): CompletionBatch | undefined {
+    return this.completionBatches().find(batch => batch.continuationOperationId === operationId);
   }
   updateCompletionMemberStatus(operationId: string, status: Operation["status"]) {
     const row = this.db.query<{ data: string }, [string]>("SELECT data FROM completion_batches WHERE EXISTS (SELECT 1 FROM completion_members WHERE completion_members.parent_agent_id=completion_batches.parent_agent_id AND completion_members.parent_session_id=completion_batches.parent_session_id AND completion_members.root_operation_id=completion_batches.root_operation_id AND completion_members.operation_id=?)").get(operationId);
@@ -208,7 +231,7 @@ export class Store {
   }
   pruneTerminalOperations(maxOperations: number): string[] {
     const pinned = new Set(this.pinnedOperationIds());
-    const terminalRows = this.operations().filter(op => ["completed", "failed", "stopped"].includes(op.status));
+    const terminalRows = this.operations().filter(op => ["completed", "failed", "stopped", "interrupted"].includes(op.status));
     const unpinned = terminalRows.filter(op => !pinned.has(op.id));
     const remove = unpinned.slice(0, Math.max(0, terminalRows.length - maxOperations));
     for (const op of remove) this.deleteOperation(op.id);

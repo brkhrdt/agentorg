@@ -410,16 +410,20 @@ export class Organization implements PluginHost {
   }
   private finish(
     op: Operation,
-    status: "completed" | "failed" | "stopped",
+    status: "completed" | "failed" | "stopped" | "interrupted",
     result?: unknown,
     error?: unknown,
+    interruptionReason: NonNullable<import("./completion-contract.ts").CompletionBatch["interruptionReason"]> = "server-recovery",
   ) {
     if (terminal(op)) return;
     const completed: Operation = { ...op, status, completedAt: now(), result: bounded(result, this.limits.maxResponseBytes) };
     if (error) completed.error = errorShape(error);
     const batch = this.store.completionBatches().find(candidate => candidate.continuationOperationId === op.id);
     if (batch) {
-      if (!this.store.finishCompletion(completed, batch)) throw new Error("Completion continuation transition rejected");
+      const transitioned = status === "interrupted"
+        ? this.store.interruptCompletion(completed, batch, interruptionReason)
+        : this.store.finishCompletion(completed, batch);
+      if (!transitioned) throw new Error("Completion continuation transition rejected");
       Object.assign(op, completed);
       this.emit("operation.changed", op, op.agentId ?? undefined);
       for (const id of this.store.pruneTerminalOperations(this.limits.maxOperations)) this.operations.delete(id);
@@ -534,7 +538,7 @@ export class Organization implements PluginHost {
         if (!terminal(op))
           this.finish(
             op,
-            "stopped",
+            this.store.completionBatchForOperation(op.id) ? "interrupted" : "stopped",
             undefined,
             new ApiError("INTERRUPTED", "Server restarted"),
           );
@@ -593,7 +597,20 @@ export class Organization implements PluginHost {
   }
   private reconcileAndDispatchCompletionBatches() {
     this.reconcileCompletionBatches();
-    for (const batch of this.store.completionBatches()) if (batch.state === "ready") this.dispatchCompletionBatch(batch);
+    for (const batch of this.store.completionBatches()) {
+      if (["dispatched", "invalidated"].includes(batch.state)) continue;
+      const recipient = this.agents.get(batch.identity.parentAgentId);
+      if (!recipient || recipient.removedAt) this.store.suppressCompletion(batch, "recipient-removed");
+      else if (recipient.sessionId !== batch.identity.parentSessionId) this.store.suppressCompletion(batch, "session-replaced");
+      else if (recipient.state === "failed") this.store.suppressCompletion(batch, "recipient-failed");
+      else if (!this.runtimes.has(recipient.id) && !["stopped", "recovering", "starting"].includes(recipient.state)) this.store.suppressCompletion(batch, "no-live-recipient");
+      else if (batch.state === "ready") this.dispatchCompletionBatch(batch);
+    }
+  }
+  private suppressRecipientBatches(agentId: string, reason: string) {
+    for (const batch of this.store.completionBatches())
+      if (batch.identity.parentAgentId === agentId && batch.deliveryResolution !== "delivered" && batch.state !== "invalidated")
+        this.store.suppressCompletion(batch, reason);
   }
   /** Evaluate only enrolled roots, deepest first, once serialized state has settled. */
   private reconcileCompletionBatches() {
@@ -620,7 +637,7 @@ export class Organization implements PluginHost {
   }
   private dispatchCompletionBatch(batch: import("./completion-contract.ts").CompletionBatch) {
     const id = batch.identity.parentAgentId, rt = this.runtimes.get(id), agent = this.agents.get(id);
-    if (batch.state !== "ready" || batch.dispatchSuppressed) return;
+    if (!this.initialized || this.closing || batch.state !== "ready" || batch.dispatchSuppressed) return;
     if (!agent || agent.removedAt || agent.sessionId !== batch.identity.parentSessionId) {
       this.store.suppressCompletion(batch, "parent-session-replaced");
       try { this.emit("completion.dispatch_suppressed", { batchId: batch.identity.rootOperationId, reason: "parent-session-replaced" }, id); } catch {}
@@ -969,7 +986,7 @@ export class Organization implements PluginHost {
           let changes: AgentRecord[];
           try {
             if (launchChanged && active) {
-              await this.stop(this.agent(a.id));
+              await this.stop(this.agent(a.id), undefined, "settings-restart");
               a.state = "stopped"; a.generation = null;
             }
             await this.applyMutation(transaction.changes);
@@ -991,6 +1008,7 @@ export class Organization implements PluginHost {
           }
           await this.finalizeMutation(transaction.changes);
           this.publishSettings(changes);
+          if (harnessChanged) this.suppressRecipientBatches(a.id, "session-replaced");
           if (launchChanged && active) await this.start(a, !harnessChanged);
           return structuredClone(a);
         });
@@ -1011,7 +1029,7 @@ export class Organization implements PluginHost {
           const transactions: Awaited<ReturnType<Organization["prepareMutation"]>>[] = [];
           try {
             for (const x of tree) transactions.push(await this.prepareMutation({ method, caller, agent: x, previous: x, agents: [...this.agents.values()] }));
-            for (const x of [...tree].reverse()) await this.stop(x);
+            for (const x of [...tree].reverse()) await this.stop(x, undefined, "restart");
             for (const transaction of transactions) await this.applyMutation(transaction.changes);
             const records = tree.map((x, i) => {
               const record = { ...structuredClone(x), settings: transactions[i]!.settings };
@@ -1038,6 +1056,9 @@ export class Organization implements PluginHost {
               this.emit("agent.modified", record, record.id);
           }
           const current = this.agent(p.agentId, false);
+          if (method === "agent.stop") this.suppressRecipientBatches(p.agentId, "explicit-stop");
+          else if (method === "agent.remove") for (const x of tree) this.suppressRecipientBatches(x.id, "recipient-removed");
+          else if (method === "agent.replace_session") this.suppressRecipientBatches(p.agentId, "session-replaced");
           if (method === "agent.remove") {
             for (const x of tree) this.emit("agent.removed", { removedAt: this.agents.get(x.id)!.removedAt }, x.id);
           } else if (method !== "agent.stop") {
@@ -1408,7 +1429,9 @@ export class Organization implements PluginHost {
         this.limits.startTimeoutMs,
         "ACP startup timed out",
       );
+      const previousSessionId = a.sessionId;
       a.sessionId = proc.sessionId;
+      if (previousSessionId !== a.sessionId) this.suppressRecipientBatches(a.id, "session-replaced");
       this.state(a, "idle");
     } catch (error) {
       if (rt) {
@@ -1421,21 +1444,23 @@ export class Organization implements PluginHost {
       throw error;
     }
   }
-  private async stop(a: AgentRecord, error?: Error) {
+  private async stop(a: AgentRecord, error?: Error, reason: "restart" | "settings-restart" | "shutdown" | "explicit" | "failure" = "explicit") {
     const rt = this.runtimes.get(a.id);
     if (rt) {
       this.runtimes.delete(a.id);
       this.tokens.delete(rt.token);
       this.cancelPermissions(a.id);
-      for (const op of rt.queue) this.finish(op, "stopped");
+      for (const op of rt.queue) {
+        const continuation = this.store.completionBatchForOperation(op.id);
+        const status = continuation && ["restart", "settings-restart", "shutdown"].includes(reason) ? "interrupted" : continuation && reason === "failure" ? "failed" : "stopped";
+        this.finish(op, status, undefined, status === "interrupted" ? new ApiError("INTERRUPTED", "Recipient interrupted") : status === "failed" ? error : undefined, reason === "shutdown" ? "server-shutdown" : reason === "settings-restart" ? "settings-restart" : "transient-restart");
+      }
       await rt.process.stop();
-      if (rt.active)
-        this.finish(
-          rt.active.op,
-          error && !rt.active.op.cancelRequested ? "failed" : "stopped",
-          rt.active.op.result,
-          error,
-        );
+      if (rt.active) {
+        const continuation = this.store.completionBatchForOperation(rt.active.op.id);
+        const status = continuation && ["restart", "settings-restart", "shutdown"].includes(reason) ? "interrupted" : error && !rt.active.op.cancelRequested ? "failed" : "stopped";
+        this.finish(rt.active.op, status, rt.active.op.result, status === "interrupted" ? new ApiError("INTERRUPTED", "Recipient interrupted") : error, reason === "shutdown" ? "server-shutdown" : reason === "settings-restart" ? "settings-restart" : "transient-restart");
+      }
     }
     a.generation = null;
     this.state(a, "stopped");
@@ -1444,7 +1469,7 @@ export class Organization implements PluginHost {
     const rt = this.runtimes.get(id);
     if (!rt || rt.generation !== generation) return;
     const a = this.agent(id);
-    await this.stop(a, new ApiError("PROCESS_EXITED", message));
+    await this.stop(a, new ApiError("PROCESS_EXITED", message), "failure");
     this.state(a, "failed", message);
     this.emit("agent.error", { message }, id, generation);
   }
@@ -1611,7 +1636,7 @@ export class Organization implements PluginHost {
           this.runtimes.get(a.id) === rt &&
           rt.active === active
         ) {
-          await this.stop(a);
+          await this.stop(a, error instanceof Error ? error : new Error(String(error)), "failure");
           this.state(a, "failed", errorShape(error).message);
         }
       }),
@@ -1806,7 +1831,7 @@ export class Organization implements PluginHost {
       for (const a of [...this.agents.values()]
         .filter((a) => this.runtimes.has(a.id))
         .sort((a, b) => this.depth(b) - this.depth(a)))
-        await this.stop(a);
+        await this.stop(a, undefined, "shutdown");
       for (const op of this.operations.values())
         if (!terminal(op)) this.finish(op, "stopped");
       this.emit("server.stopped", {});

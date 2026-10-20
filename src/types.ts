@@ -45,7 +45,8 @@ export type OperationStatus =
   | "running"
   | "completed"
   | "failed"
-  | "stopped";
+  | "stopped"
+  | "interrupted";
 export interface Operation {
   id: string;
   /** Optional server-owned prompt origin. Absent on legacy and non-prompt operations. */
@@ -108,7 +109,7 @@ export function errorShape(error: unknown): ApiErrorShape {
   };
 }
 export const terminal = (op: Operation) =>
-  ["completed", "failed", "stopped"].includes(op.status);
+  ["completed", "failed", "stopped", "interrupted"].includes(op.status);
 export const now = () => new Date().toISOString();
 export const defaults = {
   maxDepth: 8,
