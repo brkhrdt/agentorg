@@ -79,6 +79,10 @@ acp
         if (mcpServers[0]) await inspectCompletionBatch(batchId);
       }
     }
+    if (text === "sibling-barrier" && process.env.SIBLING_BARRIER_DIR) {
+      writeFileSync(join(process.env.SIBLING_BARRIER_DIR, "sibling.started"), "started");
+      while (!existsSync(join(process.env.SIBLING_BARRIER_DIR, "sibling.release"))) await delay(10);
+    }
     if (text === "crash") process.exit(2);
     if (text === "permission") {
       const result = await ctx.client.request("session/request_permission", {

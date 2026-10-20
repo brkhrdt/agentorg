@@ -464,14 +464,15 @@ test("startup preserves persisted cancellation intent and never replays the deli
 test("three-level fire-and-return uses stdio MCP results and isolates unrelated sibling work", async () => {
   const { client, server, dir } = await setup();
   const root = await create(client, null, { COMPLETION_BARRIER_DIR: dir, COMPLETION_QUERY_DIR: dir });
-  const sibling = await create(client, root.id);
-  const siblingWork = await prompt(client, sibling.id, "sleep:2500");
-  await until(() => server.organization.operations.get(siblingWork.id)?.status === "running");
+  const sibling = await create(client, root.id, { SIBLING_BARRIER_DIR: dir });
+  const siblingWork = await prompt(client, sibling.id, "sibling-barrier");
+  await until(() => existsSync(join(dir, "sibling.started")) && server.organization.operations.get(siblingWork.id)?.status === "running");
   const parent = await client.wait(await prompt(client, root.id, "chain-root"));
   expect(parent.status).toBe("completed");
   const outerBatch = () => server.organization.store.completionBatches().find(batch => batch.identity.rootOperationId === parent.id)!;
   await until(() => outerBatch().state === "dispatching" && existsSync(join(dir, `continuation-${parent.id}.started`)));
   expect(server.organization.operations.get(siblingWork.id)?.status).toBe("running");
+  expect(existsSync(join(dir, "sibling.release"))).toBe(false);
   const middleId = outerBatch().memberOperationIds.map(id => server.organization.operations.get(id)?.agentId).find(id => id && id !== sibling.id)!;
   const innerBatch = () => server.organization.store.completionBatches().find(batch => batch.identity.parentAgentId === middleId)!;
   await until(() => innerBatch().state === "dispatched");
@@ -500,6 +501,8 @@ test("three-level fire-and-return uses stdio MCP results and isolates unrelated 
   expect((await ancestorClient.request<Operation>("operation.get", { operationId: inner.memberOperationIds[0] })).status).toBe("completed");
   await Bun.write(join(dir, `continuation-${parent.id}.release`), "release");
   await until(() => outerBatch().state === "dispatched");
+  await Bun.write(join(dir, "sibling.release"), "release");
+  await client.wait(siblingWork);
   const outerQuery = JSON.parse(await Bun.file(join(dir, `completion-query-${parent.id}.json`)).text());
   expect(outerQuery.members).toHaveLength(1);
   expect(outerQuery.members[0].status).toBe("completed");
@@ -508,7 +511,6 @@ test("three-level fire-and-return uses stdio MCP results and isolates unrelated 
   for (const batchId of [inner.identity.rootOperationId, parent.id]) {
     expect(server.organization.store.history(0, 10000).events.filter(event => event.type === "completion.dispatch_started" && (event.data as any).batchId === batchId)).toHaveLength(1);
   }
-  await client.wait(siblingWork);
 });
 
 test("failed initialization preserves completion obligations until successful recovery", async () => {
