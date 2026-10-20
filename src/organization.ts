@@ -596,7 +596,9 @@ export class Organization implements PluginHost {
     }, delay);
   }
   private reconcileAndDispatchCompletionBatches() {
-    this.reconcileCompletionBatches();
+    // Recovery hooks/startup may still fail. Do not reinterpret the temporarily absent
+    // runtime as a permanently unavailable recipient until initialization succeeds.
+    if (!this.initialized || this.closing) return;
     for (const batch of this.store.completionBatches()) {
       if (["dispatched", "invalidated"].includes(batch.state)) continue;
       const recipient = this.agents.get(batch.identity.parentAgentId);
@@ -604,8 +606,12 @@ export class Organization implements PluginHost {
       else if (recipient.sessionId !== batch.identity.parentSessionId) this.store.suppressCompletion(batch, "session-replaced");
       else if (recipient.state === "failed") this.store.suppressCompletion(batch, "recipient-failed");
       else if (!this.runtimes.has(recipient.id) && !["stopped", "recovering", "starting"].includes(recipient.state)) this.store.suppressCompletion(batch, "no-live-recipient");
-      else if (batch.state === "ready") this.dispatchCompletionBatch(batch);
     }
+    // Nested recipient suppression can unblock its ancestor. Iterate over the finite
+    // durable batch set to a fixed point before dispatching anything this turn.
+    const maxPasses = this.store.completionBatches().length + 1;
+    for (let pass = 0; pass < maxPasses; pass++) if (!this.reconcileCompletionBatches()) break;
+    for (const batch of this.store.completionBatches()) if (batch.state === "ready") this.dispatchCompletionBatch(batch);
   }
   private suppressRecipientBatches(agentId: string, reason: string) {
     for (const batch of this.store.completionBatches())
@@ -613,8 +619,9 @@ export class Organization implements PluginHost {
         this.store.suppressCompletion(batch, reason);
   }
   /** Evaluate only enrolled roots, deepest first, once serialized state has settled. */
-  private reconcileCompletionBatches() {
-    if (!this.initialized || this.closing) return;
+  private reconcileCompletionBatches(): boolean {
+    if (!this.initialized || this.closing) return false;
+    let changed = false;
     const allBatches = this.store.completionBatches();
     const batches = allBatches
       .filter(batch => batch.state === "collecting" || batch.state === "ready")
@@ -627,13 +634,16 @@ export class Organization implements PluginHost {
       if (ready && batch.state === "collecting") {
         batch.state = "ready";
         this.store.setCompletionBatch(batch);
+        changed = true;
         // Persisted readiness must survive a failed observer/diagnostic event.
         try { this.emit("completion.ready", { batchId: batch.identity.rootOperationId, operationCount: batch.memberOperationIds.length }, batch.identity.parentAgentId); } catch {}
       } else if (!ready && batch.state === "ready") {
         batch.state = "collecting";
         this.store.setCompletionBatch(batch);
+        changed = true;
       }
     }
+    return changed;
   }
   private dispatchCompletionBatch(batch: import("./completion-contract.ts").CompletionBatch) {
     const id = batch.identity.parentAgentId, rt = this.runtimes.get(id), agent = this.agents.get(id);
@@ -1458,7 +1468,7 @@ export class Organization implements PluginHost {
       await rt.process.stop();
       if (rt.active) {
         const continuation = this.store.completionBatchForOperation(rt.active.op.id);
-        const status = continuation && ["restart", "settings-restart", "shutdown"].includes(reason) ? "interrupted" : error && !rt.active.op.cancelRequested ? "failed" : "stopped";
+        const status = continuation && rt.active.op.cancelRequested ? "stopped" : continuation && ["restart", "settings-restart", "shutdown"].includes(reason) ? "interrupted" : error && !rt.active.op.cancelRequested ? "failed" : "stopped";
         this.finish(rt.active.op, status, rt.active.op.result, status === "interrupted" ? new ApiError("INTERRUPTED", "Recipient interrupted") : error, reason === "shutdown" ? "server-shutdown" : reason === "settings-restart" ? "settings-restart" : "transient-restart");
       }
     }

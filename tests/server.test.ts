@@ -6,6 +6,7 @@ import { createConnection } from "node:net";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { OrganizationServer } from "../src/server.ts";
+import { Organization } from "../src/organization.ts";
 import { OrganizationClient } from "../src/client.ts";
 import { JsonLines } from "../src/jsonl.ts";
 import { Store } from "../src/store.ts";
@@ -436,6 +437,61 @@ test("completion dispatch does not preempt competing parent work and restores ma
   expect(server.organization.operations.get(batch().continuationOperationId!)?.status).toBe("completed");
 });
 
+test("failed initialization preserves completion obligations until successful recovery", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "org-init-completion-"));
+  dirs.push(dir);
+  const org = new Organization(join(dir, "server.sock"), dir);
+  let fail = true;
+  try {
+    await org.use(fixture);
+    await org.use({ name: "one-shot-initialize-failure", apiVersion: 1, setup(host) {
+      host.onInitialize(() => { if (fail) { fail = false; throw new Error("injected initialize failure"); } });
+    } });
+    const root: AgentRecord = { id: "recovery-root", parentId: null, name: "root", metadata: {}, settings: { harness: "fixture", options: {} }, state: "running", revision: 1, generation: "old", sessionId: "same-session", sessionNumber: 1, removedAt: null, createdAt: now(), updatedAt: now() };
+    org.store.saveAgent(root); org.agents.set(root.id, root);
+    const batchId = crypto.randomUUID();
+    const member: Operation = { id: crypto.randomUUID(), type: "agent.prompt", agentId: root.id, input: {}, caller: { kind: "server", id: "test" }, status: "completed", createdAt: now(), completedAt: now(), result: "kept" };
+    expect(org.store.admitCompletionOperation(member, { parentAgentId: root.id, parentSessionId: root.sessionId, rootOperationId: batchId }, [root.id], 4)).toBe(true);
+    org.operations.set(member.id, member);
+    const batch = org.store.completionBatches()[0]!; batch.state = "ready"; org.store.setCompletionBatch(batch);
+    await expect(org.initialize()).rejects.toThrow("injected initialize failure");
+    expect(org.store.completionBatches()[0]?.state).toBe("ready");
+    expect(org.store.completionBatches()[0]?.dispatchSuppressed).toBeUndefined();
+    expect(org.store.pinnedOperationIds()).toEqual([member.id]);
+    await org.initialize(true);
+    await until(() => org.store.completionBatches()[0]?.state === "dispatched");
+    expect(org.store.pinnedOperationIds()).toHaveLength(0);
+    expect(org.store.completionBatches()[0]?.identity.rootOperationId).toBe(batchId);
+  } finally { await org.close(); }
+});
+
+test("nested unavailable recipient suppression unblocks ancestor in the same reconciliation turn", async () => {
+  const { client, server } = await setup();
+  const root = await create(client), child = await create(client, root.id);
+  await mutate(client, "agent.stop", child.id);
+  const failedChild = server.organization.agents.get(child.id)!;
+  failedChild.state = "failed"; server.organization.store.saveAgent(failedChild);
+  const outerId = crypto.randomUUID(), innerId = crypto.randomUUID();
+  const addMember = (parent: AgentRecord, batchId: string, target: string) => {
+    const member: Operation = { id: crypto.randomUUID(), type: "agent.prompt", agentId: target, input: {}, caller: { kind: "server", id: "nested-failure" }, status: "completed", createdAt: now(), completedAt: now(), result: "settled" };
+    expect(server.organization.store.admitCompletionOperation(member, { parentAgentId: parent.id, parentSessionId: parent.sessionId, rootOperationId: batchId }, [target], 8)).toBe(true);
+    server.organization.operations.set(member.id, member);
+  };
+  addMember(root, outerId, child.id); addMember(failedChild, innerId, child.id);
+  for (const id of [outerId, innerId]) {
+    const batch = server.organization.store.completionBatches().find(item => item.identity.rootOperationId === id)!;
+    batch.state = "ready"; server.organization.store.setCompletionBatch(batch);
+  }
+  (server.organization as any).reconcileAndDispatchCompletionBatches();
+  await until(() => server.organization.store.completionBatches().find(item => item.identity.rootOperationId === outerId)?.state === "dispatched");
+  const inner = server.organization.store.completionBatches().find(item => item.identity.rootOperationId === innerId)!;
+  expect(inner).toMatchObject({ state: "dispatched", dispatchSuppressed: true, suppressionReason: "recipient-failed" });
+  const outer = server.organization.store.completionBatches().find(item => item.identity.rootOperationId === outerId)!;
+  expect(outer.deliveryResolution).toBe("delivered");
+  expect(outer.dispatchSuppressed).toBeUndefined();
+  expect(server.organization.store.pinnedOperationIds()).toHaveLength(0);
+});
+
 test("same-session parent restart interrupts in-flight delivery and retries the logical batch once", async () => {
   const { client, server, dir } = await setup();
   const root = await create(client, null, { COMPLETION_BARRIER_DIR: dir });
@@ -482,6 +538,24 @@ test("settings restart preserves the same-session delivery with a durable restar
   await until(() => findBatch().state === "dispatched");
   expect(server.organization.operations.get(retryId)?.status).toBe("completed");
   expect(server.organization.store.pinnedOperationIds()).toHaveLength(0);
+});
+
+test("pending explicit cancellation wins over restart interruption and is never replayed", async () => {
+  const { client, server, dir } = await setup();
+  const root = await create(client, null, { COMPLETION_BARRIER_DIR: dir });
+  const parent = await client.wait(await prompt(client, root.id, "delegate-return"));
+  const batchForParent = () => server.organization.store.completionBatches().find(batch => batch.identity.rootOperationId === parent.id)!;
+  await until(() => batchForParent()?.state === "dispatching");
+  const oldId = batchForParent().continuationOperationId!;
+  await until(() => existsSync(join(dir, `continuation-${parent.id}.started`)));
+  await client.request("operation.cancel", { operationId: oldId });
+  await client.wait(await client.request("agent.restart", { agentId: root.id }));
+  expect(server.organization.operations.get(oldId)?.status).toBe("stopped");
+  expect(batchForParent()).toMatchObject({ state: "dispatched", deliveryResolution: "cancelled" });
+  expect(batchForParent().continuationOperationId).toBe(oldId);
+  expect(server.organization.store.pinnedOperationIds()).toHaveLength(0);
+  await Bun.sleep(100);
+  expect(batchForParent().continuationOperationId).toBe(oldId);
 });
 
 test("shutdown preserves an interrupted notification through no-recover until explicit restart", async () => {
