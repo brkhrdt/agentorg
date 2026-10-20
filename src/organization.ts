@@ -44,6 +44,7 @@ const object = z.object({}).passthrough();
 const target = z.object({ agentId: z.string() });
 const page = z.object({
   after: z.number().int().nonnegative().default(0),
+  before: z.number().int().nonnegative().optional(),
   limit: z.number().int().min(1).max(1000).default(100),
   agentId: z.string().optional(),
 });
@@ -120,7 +121,7 @@ export class Organization implements PluginHost {
   ) {
     this.limits = { ...defaults, ...limits };
     for (const [name, value] of Object.entries(this.limits)) {
-      if (!Number.isSafeInteger(value) || value < 1)
+      if (!Number.isSafeInteger(value) || value < (name === "maxEvents" ? 0 : 1))
         throw new Error(`Invalid limit ${name}`);
     }
     if (this.limits.maxResponseBytes < 256)
@@ -978,12 +979,14 @@ export class Organization implements PluginHost {
         const p = page.extend({ renderings: z.boolean().default(false) }).parse(params);
         if (caller.kind === "agent" && !p.agentId) p.agentId = caller.id;
         if (p.agentId) this.authorize(caller, p.agentId);
-        const history = this.store.history(p.after, p.limit, p.agentId);
-        if (!p.renderings || caller.kind === "agent") return history;
-        return { ...history, renderings: Object.fromEntries(history.events.flatMap(event => {
-          const rendering = this.renderEvent(event);
-          return rendering ? [[event.seq, rendering]] : [];
-        })) };
+        // Reserve transport-envelope space and leave room for live traffic. Iterate
+        // records lazily: a count-limited SQL .all() can still allocate huge pages.
+        const maxBytes = Math.min(512 * 1024, this.limits.maxClientBufferBytes - 1024);
+        if (maxBytes < 512) throw new ApiError("LIMIT", "Client output limit is too small for history");
+        return this.store.history(p.after, p.limit, p.agentId, {
+          before: p.before, maxBytes,
+          ...(p.renderings && caller.kind !== "agent" ? { render: (event: ServerEvent) => this.renderEvent(event) } : {}),
+        });
       }
       case "permission.respond": {
         const p = z

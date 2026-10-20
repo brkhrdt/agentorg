@@ -198,16 +198,16 @@ export class ServerSettingsRegistry {
 const descriptions: Record<keyof Limits, string> = {
   maxDepth: "Maximum agent hierarchy depth.", maxChildren: "Maximum direct children per agent.", maxProcesses: "Maximum concurrent agent processes; lowering does not stop existing processes.",
   maxPrompts: "Maximum concurrent prompts; lowering does not cancel active prompts.", maxPromptBytes: "Maximum bytes in a submitted prompt.", maxResponseBytes: "Maximum stored result/event bytes before truncation (minimum 256).",
-  maxEvents: "Retained events; pruning happens on subsequent events.", maxOperations: "Retained terminal operations; pruning happens on subsequent operations.", maxQueuedPrompts: "Maximum queued prompts per agent.", maxAgents: "Maximum stored agent records; lowering does not delete records.",
+  maxEvents: "Retained database events; 0 keeps all history (default). A positive limit permanently deletes older events on subsequent writes.", maxOperations: "Retained terminal operations; pruning happens on subsequent operations.", maxQueuedPrompts: "Maximum queued prompts per agent.", maxAgents: "Maximum stored agent records; lowering does not delete records.",
   maxLineBytes: "Maximum transport/ACP message bytes; requires a server restart.", maxClientBufferBytes: "Maximum pending output bytes per client; slow clients disconnect.",
   stopTimeoutMs: "Graceful process shutdown timeout in milliseconds.", killTimeoutMs: "Termination escalation timeout in milliseconds.", startTimeoutMs: "Startup and launch-hook timeout in milliseconds.", cancelTimeoutMs: "Prompt cancellation timeout in milliseconds.", maxWaitMs: "Maximum operation wait duration in milliseconds.",
 };
 export function coreSettings(limits: Limits): ServerSettingsDefinition {
   return { namespace: "core", title: "Organization / core", version: 1,
     description: "Server-wide runtime limits. Changes affect every client; no agents are automatically restarted.",
-    defaults: { ...limits }, fields: Object.keys(defaults).map(name => ({ key: name, label: name, description: descriptions[name as keyof Limits], editor: "number", min: name === "maxResponseBytes" ? 256 : 1, max: Number.MAX_SAFE_INTEGER, effect: name === "maxLineBytes" ? "restart" : "immediate" })),
+    defaults: { ...limits }, fields: Object.keys(defaults).map(name => ({ key: name, label: name, description: descriptions[name as keyof Limits], editor: "number", min: name === "maxResponseBytes" ? 256 : name === "maxEvents" ? 0 : 1, max: Number.MAX_SAFE_INTEGER, effect: name === "maxLineBytes" ? "restart" : "immediate" })),
     validate(value) {
-      for (const name of Object.keys(defaults)) if (!Number.isSafeInteger(value[name]) || (value[name] as number) < (name === "maxResponseBytes" ? 256 : 1)) throw new ApiError("INVALID_PARAMS", `Invalid limit ${name}`);
+      for (const name of Object.keys(defaults)) if (!Number.isSafeInteger(value[name]) || (value[name] as number) < (name === "maxResponseBytes" ? 256 : name === "maxEvents" ? 0 : 1)) throw new ApiError("INVALID_PARAMS", `Invalid limit ${name}`);
       return value;
     },
   };

@@ -108,7 +108,7 @@ export const defaults = {
   maxPrompts: 8,
   maxPromptBytes: 128 * 1024,
   maxResponseBytes: 1024 * 1024,
-  maxEvents: 100_000,
+  maxEvents: 0, // Unlimited durable history; independent of client memory caches.
   maxOperations: 10_000,
   maxQueuedPrompts: 100,
   maxAgents: 10_000,

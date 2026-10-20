@@ -1,7 +1,8 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync, chmodSync } from "node:fs";
 import { dirname } from "node:path";
-import type { AgentRecord, Operation, ServerEvent } from "./types.ts";
+import { ApiError, bounded, type AgentRecord, type Operation, type ServerEvent } from "./types.ts";
+import type { EventRendering } from "./rendering.ts";
 import type { ServerSettingsRecord } from "./server-settings.ts";
 
 /** Records are durable; only bounded event and terminal-operation history is pruned. */
@@ -18,6 +19,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS server_settings (namespace TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY, agent_id TEXT, data TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS events_agent_seq ON events (agent_id, seq);
       CREATE INDEX IF NOT EXISTS events_tool_context ON events (
         agent_id, json_extract(data, '$.generation'), json_extract(data, '$.data.toolCallId'), seq
       ) WHERE json_extract(data, '$.type') IN ('tool.call', 'tool.update', 'tool.result')
@@ -76,7 +78,7 @@ export class Store {
       this.db
         .query("INSERT INTO events VALUES (?, ?, ?)")
         .run(seq, event.agentId ?? null, JSON.stringify(full));
-      this.db.query("DELETE FROM events WHERE seq <= ?").run(seq - maxEvents);
+      if (maxEvents > 0) this.db.query("DELETE FROM events WHERE seq <= ?").run(seq - maxEvents);
       return full;
     })();
   }
@@ -143,35 +145,55 @@ export class Store {
     after: number,
     limit: number,
     agentId?: string,
+    options: { before?: number; maxBytes?: number; render?: (event: ServerEvent) => EventRendering | undefined } = {},
   ): {
     events: ServerEvent[];
+    renderings?: Record<number, EventRendering>;
     oldestSeq: number;
     latestSeq: number;
     expired: boolean;
+    hasMore: boolean;
   } {
-    const oldestSeq =
-      this.db
-        .query<{ seq: number | null }, []>("SELECT MIN(seq) AS seq FROM events")
-        .get()!.seq ?? this.sequence() + 1;
-    const rows = agentId
-      ? this.db
-          .query<
-            { data: string },
-            [number, string, number]
-          >("SELECT data FROM events WHERE seq>? AND agent_id=? ORDER BY seq LIMIT ?")
-          .all(after, agentId, limit)
-      : this.db
-          .query<
-            { data: string },
-            [number, number]
-          >("SELECT data FROM events WHERE seq>? ORDER BY seq LIMIT ?")
-          .all(after, limit);
-    return {
-      events: rows.map((r) => JSON.parse(r.data)),
-      oldestSeq,
-      latestSeq: this.sequence(),
-      expired: after < oldestSeq - 1,
-    };
+    const latestSeq = this.sequence();
+    const oldestSeq = this.db.query<{ seq: number | null }, []>("SELECT MIN(seq) AS seq FROM events").get()!.seq ?? latestSeq + 1;
+    const backwards = options.before !== undefined;
+    const conditions = ["seq>?"];
+    const params: (number | string)[] = [after];
+    if (backwards) { conditions.push("seq<?"); params.push(options.before!); }
+    if (agentId) { conditions.push("agent_id=?"); params.push(agentId); }
+    params.push(limit + 1);
+    const rows = this.db.prepare<{ data: string }, (number | string)[]>(`SELECT data FROM events WHERE ${conditions.join(" AND ")} ORDER BY seq ${backwards ? "DESC" : "ASC"} LIMIT ?`);
+    const events: ServerEvent[] = [];
+    const renderings: Record<number, EventRendering> = {};
+    const budget = (options.maxBytes ?? 512 * 1024) - 512;
+    let bytes = 0, hasMore = false;
+    try {
+      for (const row of rows.iterate(...params)) {
+        if (events.length >= limit) { hasMore = true; break; }
+        let event = JSON.parse(row.data) as ServerEvent;
+        let rendering = options.render?.(event);
+        const size = () => Buffer.byteLength(JSON.stringify(event)) + (rendering ? Buffer.byteLength(JSON.stringify(rendering)) + 32 : 0) + 2;
+        let length = size();
+        if (bytes + length > budget && events.length) { hasMore = true; break; }
+        // An individual oversized record must not strand a cursor or disconnect
+        // the client. Preview only the wire copy; the durable record is unchanged.
+        if (length > budget) {
+          rendering = undefined;
+          if (size() > budget) event = { ...event, data: bounded(event.data, Math.max(128, Math.floor(budget / 2))) };
+          length = size();
+          if (length > budget) throw new ApiError("LIMIT", "Event metadata exceeds the history page budget");
+        }
+        events.push(event);
+        if (rendering) renderings[event.seq] = rendering;
+        bytes += length;
+      }
+    } finally {
+      // A cached .query() statement left mid-iteration cannot be safely reused
+      // on every supported Bun version. This short-lived statement is finalized.
+      rows.finalize();
+    }
+    if (backwards) events.reverse();
+    return { events, ...(options.render && { renderings }), oldestSeq, latestSeq, expired: after < oldestSeq - 1, hasMore };
   }
   close() {
     this.db.close();

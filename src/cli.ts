@@ -32,7 +32,7 @@ if (values.config) {
       Object.fromEntries(
         Object.keys(defaults).map((key) => [
           key,
-          z.number().int().positive().optional(),
+          z.number().int().min(key === "maxEvents" ? 0 : 1).optional(),
         ]),
       ),
     )

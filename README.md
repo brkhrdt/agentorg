@@ -106,7 +106,7 @@ Errors: `{"kind":"response","id":"1","ok":false,"error":{"code":"CONFLICT","mess
 | `operation.wait`        | `{operationId, waitMs?: number}`; default 1s, capped at configured maximum (30s); waiting never cancels work                        |
 | `operation.cancel`      | `{operationId}`; queued operations stop immediately; active prompts request cancellation                                            |
 | `subscribe`             | `{enabled?, types?, excludeTypes?, agentIds?, subtrees?}`; replaces this connection's filter; default all live events               |
-| `events.history`        | `{after?: number, limit?: number, agentId?}`; retained events after a sequence, max page size 1000, exact agent filter              |
+| `events.history`        | `{after?: number, before?: number, limit?: number, agentId?}`; paged retained events, max 1000, exact agent filter              |
 | `permission.respond`    | `{permissionId, optionId? , cancelled?}`; select an offered option or cancel                                                        |
 
 For repeated state refreshes, pass `includeTerminalOperations: false` to avoid resending completed/failed/stopped operations and their accumulated prompt results. Active operations and all authorized agent records remain included. The default full snapshot is unchanged and can exceed client-output limits with large retained operation bodies; use lightweight snapshots plus `operation.get` and paged `events.history` for details. This option is also available on the `organization_snapshot` MCP tool.
@@ -142,7 +142,7 @@ client.close();
 
 Categories: `server.ready/stopped`, `agent.created/state/modified/removed/session_replaced`, `agent.message/update/plan/error`, `tool.call/update/result`, `prompt.queued/started/cancelling/finished`, `operation.changed`, `permission.requested/resolved`, `plugin.error`. `agent.message` contains ACP message/thought chunks; tool results are ACP tool-call updates. All events have a durable monotonically increasing `seq`, including across server restarts. Agent events carry a process generation; replaced generations cannot update current state or complete newer work.
 
-Subscriptions are **live-only**, not replay streams. A new connection subscribes to all events by default. For resynchronization, attach your listener first, query `organization.snapshot`, and discard buffered events at/before its sequence. `events.history` provides historical pages, `{events, oldestSeq, latestSeq, expired}`. `expired=true` means the cursor precedes retained history: obtain a snapshot instead of assuming complete replay. Empty `types`/`agentIds` selects nothing. Exact and subtree live filters are supported. Slow clients exceeding their output-buffer limit are disconnected, never allowed to stall agent execution.
+Subscriptions are **live-only**, not replay streams. A new connection subscribes to all events by default. For resynchronization, attach your listener first, query `organization.snapshot`, and discard buffered events at/before its sequence. `events.history` provides historical pages, `{events, oldestSeq, latestSeq, expired, hasMore}`. By default it returns the oldest events strictly after `after` (default 0). Supplying `before` selects the newest events strictly below that sequence, also respecting `after`; events are always returned in ascending sequence order. For a recent tail, use `before: snapshot.seq + 1`; for older pages, use the first returned sequence as the next `before`. `hasMore` indicates more matching events in the requested direction. Pages are also byte-bounded (at most 512 KiB, reduced for small client-output limits), including optional renderings, so a page can contain fewer than `limit` events. A single oversized record is sent as an explicitly truncated preview without changing the database; oversized renderings may be omitted. `expired=true` means the cursor precedes retained history: obtain a snapshot instead of assuming complete replay. Empty `types`/`agentIds` selects nothing. Exact and subtree live filters are supported. Slow clients exceeding their output-buffer limit are disconnected, never allowed to stall agent execution.
 
 ## MCP and hierarchy
 
@@ -225,7 +225,7 @@ automatically restart agents. See [server settings API and plugin contract](SERV
 
 ## Persistence, limits, and recovery
 
-`limits.json` is a flat object of startup defaults (unknown keys/nonpositive values are rejected). Persisted server-settings overrides take precedence; resetting a field restores its current startup default. Built-in defaults:
+`limits.json` is a flat object of startup defaults (unknown keys/nonpositive values are rejected, except `maxEvents: 0` means unlimited). Persisted server-settings overrides take precedence; resetting a field restores its current startup default. Built-in defaults:
 
 | Limit                                           |          Default |
 | ----------------------------------------------- | ---------------: |
@@ -233,14 +233,14 @@ automatically restart agents. See [server settings API and plugin contract](SERV
 | `maxProcesses` / `maxPrompts`                   |           32 / 8 |
 | `maxQueuedPrompts` per agent                    |              100 |
 | `maxPromptBytes` / `maxResponseBytes`           |  128 KiB / 1 MiB |
-| `maxEvents` / retained terminal `maxOperations` | 100,000 / 10,000 |
+| `maxEvents` / retained terminal `maxOperations` | 0 (unlimited) / 10,000 |
 | `maxAgents` (including historical records)      |           10,000 |
 | `maxLineBytes` / `maxClientBufferBytes`         |    2 MiB / 4 MiB |
 | `startTimeoutMs` / `cancelTimeoutMs`            |   30,000 / 5,000 |
 | `stopTimeoutMs` / `killTimeoutMs`               |    5,000 / 1,000 |
 | `maxWaitMs`                                     |           30,000 |
 
-Oversized prompts/queues/trees/process counts are rejected. Oversized stored results/event data use `{truncated, originalBytes, preview}`; prompt text is additionally bounded during streaming. Large snapshots should use conservative record limits; output beyond a client's buffer cap disconnects that client. History prunes oldest events and terminal operations only, never active operations or agent records. Pruned operations return `NOT_FOUND`. Pi session files and workspaces are retained indefinitely; external archival/deletion is an operator decision.
+Oversized prompts/queues/trees/process counts are rejected. Oversized stored results/event data use `{truncated, originalBytes, preview}`; prompt text is additionally bounded during streaming. Large snapshots should use conservative record limits; output beyond a client's buffer cap disconnects that client. Events are retained indefinitely by default. `maxEvents` is a server setting editable under TUI **v → s → Organization / core**: 0 means unlimited, while a positive limit permanently prunes older events on subsequent writes. Existing explicit overrides remain in effect; reset or set `maxEvents` to 0 to disable them. Previously pruned history cannot be restored. Terminal operations remain bounded independently; pruning never removes active operations or agent records. Pruned operations return `NOT_FOUND`. Pi session files and workspaces are retained indefinitely; external archival/deletion is an operator decision.
 
 SQLite uses WAL and synchronous FULL writes; history is not erased by removal or session replacement. At startup, all pending operations become `stopped` with `INTERRUPTED`, never resumed. Previously active agents restart parent-first by default, unless `--no-recover` is selected to leave them stopped. Recovery failures mark that agent failed and continue with descendants; already stopped/failed or removed agents are not automatically restarted. Abrupt process failure is contained to its agent, not descendants.
 

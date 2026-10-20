@@ -76,7 +76,7 @@ The initial `core` group exposes the existing runtime limits. `maxLineBytes`
 requires restart because client and ACP parsers capture it at creation. Other
 limits apply at subsequent checks. Lowering count limits does not delete agents,
 stop existing processes, or cancel active prompts; admissions are constrained.
-History retention changes prune on subsequent event/operation writes. No save
+`maxEvents` defaults to **0 (unlimited durable history)**. A positive value permanently prunes older events on subsequent event writes; changing the setting alone does not prune. Existing persisted overrides are honored, so explicitly set/reset this field to 0 to disable a prior limit. Terminal-operation retention is independent. TUI history caches have separate client-only limits; cache eviction never deletes database records. No save
 changes any agent's revision or generation or automatically restarts agents.
 
 ## Rendering defaults
