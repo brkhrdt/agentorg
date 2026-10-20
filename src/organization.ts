@@ -1766,7 +1766,7 @@ export class Organization implements PluginHost {
     add(
       "descendant_prompt",
       "agent.prompt",
-      "Send work to a descendant. Default supersedes active and queued prompts; queue=true appends FIFO. Returns operation ID.",
+      "Send work to a strict descendant. If called by an active agent prompt, the accepted operation is enrolled in that parent session/root prompt's completion batch. Returning without operation_wait is fire-and-return: the server may send one automatic continuation to the issuing parent after enrolled relevant descendant work settles. Default supersedes active/queued work; queue=true appends FIFO. Returns immediately with the original operation ID. Keep a prompt slot free; waiting while all slots are occupied can deadlock.",
       { agentId: id, text: id, queue: { type: "boolean" } },
       ["agentId", "text"],
     );
@@ -1780,7 +1780,7 @@ export class Organization implements PluginHost {
     add(
       "organization_snapshot",
       "organization.snapshot",
-      "List your subtree and operations. Omit terminal operations for lightweight state refreshes.",
+      "List your authorized subtree and operations. includeTerminalOperations=false omits every terminal status (including interrupted), even pinned completion results; full snapshots retain their existing shape. Completion batch metadata is separate and queried with completion_get.",
       { includeTerminalOperations: { type: "boolean" } },
     );
     for (const action of [
@@ -1813,21 +1813,21 @@ export class Organization implements PluginHost {
     add(
       "completion_get",
       "completion.get",
-      "Inspect your own parent-completion batch metadata as a compact JSON object (b,s,t,a,n,i; items x,o,g,s,r) or expanded JSON object, paged with batchId/after/limit. Item r/resultAvailable indicates whether the original operation result is still retained; missing member status means pruned/retention-expired. Unknown or expired batches return NOT_FOUND. Fetch retained full child results separately with operation_get.",
+      "Inspect only your own parent-completion batch metadata, paged with batchId/after/limit. A batch ID is the root prompt operation ID, unique within parent agent/session; relevant roots scope settled descendant work, not unrelated siblings. Responses may be compact (b,s,t,a,n,i; item x,o,g,s,r) or expanded. resultAvailable reports retention, not result shape; missing/pruned results are not recoverable from the batch ledger. Fetch retained original results separately with authorized operation_get. Eligible fire-and-return batches dispatch automatically when the recipient is idle; polling is optional. Explicit cancellation/supersession, suppression, recipient removal/failure, or session replacement may end delivery. Same-session restart/shutdown can interrupt the delivery operation and retry the same batch ID with a new operation ID; this is not exactly-once model execution. Pins last only until delivery is terminal/suppressed and consume maxPendingCompletionOperations capacity.",
       { batchId: id, after: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: 100 } },
       ["batchId"],
     );
     add(
       "operation_get",
       "operation.get",
-      "Query an operation in your subtree. Set resultOnly=true to retrieve a compact result projection under the same authorization; response keys are a (available), s (status), t (truncated), r (result when available).",
+      "Query an operation in your authorized subtree (including descendants, not siblings). resultOnly=true returns bounded projection keys a (available), s (status), t (truncated), r (result when available); result bodies are not guaranteed to have .text. Original completion results may remain pinned until delivery ends, but can be pruned afterward. Self-operation authorization still applies.",
       { operationId: id, resultOnly: { type: "boolean" } },
       ["operationId"],
     );
     add(
       "operation_wait",
       "operation.wait",
-      "Wait up to 30 seconds without cancelling. Repeat until completed/failed/stopped; result.text contains prompt output. Waiting consumes your current prompt slot: leave room for children.",
+      "Wait up to 30 seconds without cancelling. Terminal statuses are completed, failed, stopped, and interrupted; interrupted means ACP work ended during restart/recovery and does not imply delivery completed. Prompt result shape is harness-dependent, not necessarily result.text. Waiting consumes your current prompt slot: leave room for children or descendant work to avoid deadlock.",
       {
         operationId: id,
         waitMs: { type: "integer", minimum: 0, maximum: 30000 },

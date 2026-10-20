@@ -72,12 +72,19 @@ Field effects:
   until the **server** restarts. Resetting a pending change back to the effective
   value clears the indicator. There is no server/agent restart API in this view.
 
-The initial `core` group exposes the existing runtime limits. `maxLineBytes`
-requires restart because client and ACP parsers capture it at creation. Other
-limits apply at subsequent checks. Lowering count limits does not delete agents,
-stop existing processes, or cancel active prompts; admissions are constrained.
-History retention changes prune on subsequent event/operation writes. No save
-changes any agent's revision or generation or automatically restarts agents.
+The initial `core` group exposes runtime limits, including
+`maxPendingCompletionOperations` (default **1024**), a global server-wide cap on
+pending parent-completion operation memberships. Pinned completed operations
+continue consuming this cap until the associated batch is delivered, explicitly
+cancelled/superseded, or suppressed as undeliverable. Lowering the cap affects
+future admission only; it does not cancel or discard existing obligations or
+release their pins. `maxLineBytes` requires restart because client and ACP
+parsers capture it at creation. Other limits apply at subsequent checks.
+Lowering count limits does not delete agents, stop existing processes, or cancel
+active prompts; admissions are constrained. History retention changes prune on
+subsequent event/operation writes, except that completion-pinned original
+operations are protected while their obligation remains pending. No save changes
+any agent's revision or generation or automatically restarts agents.
 
 ## Rendering defaults
 

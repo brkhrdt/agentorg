@@ -358,6 +358,8 @@ test("fire-and-return continuation preserves authenticated child results under p
   await Bun.write(join(dir, `continuation-${parent.id}.release`), "release");
   await until(() => batchForParent().state === "dispatched");
   expect(server.organization.operations.get(batch.continuationOperationId!)?.status).toBe("completed");
+  const queried = JSON.parse(await Bun.file(join(dir, `completion-query-${parent.id}.json`)).text());
+  expect(queried.members.map((item: any) => [item.operationId, item.status, item.result.text])).toEqual(batch.memberOperationIds.map((id, index) => [id, "completed", `done:${index ? "tests" : "code"} done`]));
   expect(server.organization.store.pinnedOperationIds()).toHaveLength(0);
   const capacityProbe: Operation = { id: crypto.randomUUID(), type: "agent.prompt", agentId: root.id, input: {}, caller: { kind: "server", id: "capacity-probe" }, status: "completed", createdAt: now(), completedAt: now() };
   expect(server.organization.store.admitCompletionOperation(capacityProbe, { parentAgentId: root.id, parentSessionId: root.sessionId!, rootOperationId: crypto.randomUUID() }, [root.id], 2)).toBe(true);
@@ -457,6 +459,56 @@ test("startup preserves persisted cancellation intent and never replays the deli
   expect(done.continuationOperationId).toBe(continuation.id);
   expect(server.organization.store.pinnedOperationIds()).toHaveLength(0);
   expect([...server.organization.operations.values()].filter(operation => operation.id !== continuation.id && (operation.input as any)?.text?.includes(batchId))).toHaveLength(0);
+});
+
+test("three-level fire-and-return uses stdio MCP results and isolates unrelated sibling work", async () => {
+  const { client, server, dir } = await setup();
+  const root = await create(client, null, { COMPLETION_BARRIER_DIR: dir, COMPLETION_QUERY_DIR: dir });
+  const sibling = await create(client, root.id);
+  const siblingWork = await prompt(client, sibling.id, "sleep:2500");
+  await until(() => server.organization.operations.get(siblingWork.id)?.status === "running");
+  const parent = await client.wait(await prompt(client, root.id, "chain-root"));
+  expect(parent.status).toBe("completed");
+  const outerBatch = () => server.organization.store.completionBatches().find(batch => batch.identity.rootOperationId === parent.id)!;
+  await until(() => outerBatch().state === "dispatching" && existsSync(join(dir, `continuation-${parent.id}.started`)));
+  expect(server.organization.operations.get(siblingWork.id)?.status).toBe("running");
+  const middleId = outerBatch().memberOperationIds.map(id => server.organization.operations.get(id)?.agentId).find(id => id && id !== sibling.id)!;
+  const innerBatch = () => server.organization.store.completionBatches().find(batch => batch.identity.parentAgentId === middleId)!;
+  await until(() => innerBatch().state === "dispatched");
+  const inner = innerBatch();
+  const innerQuery = JSON.parse(await Bun.file(join(dir, `completion-query-${inner.identity.rootOperationId}.json`)).text());
+  expect(innerQuery.members.map((item: any) => item.status).sort()).toEqual(["completed", "failed"]);
+  expect(innerQuery.members.find((item: any) => item.status === "completed").result).toMatchObject({ text: "done:chain-leaf" });
+  expect(innerQuery.members.find((item: any) => item.status === "failed")).toMatchObject({ resultAvailable: false });
+  expect(Object.hasOwn(innerQuery.members.find((item: any) => item.status === "failed"), "result")).toBe(false);
+
+  const siblingRuntime = (server.organization as any).runtimes.get(sibling.id);
+  const siblingMcp = new Client({ name: "sibling-security", version: "1" });
+  await siblingMcp.connect(new StdioClientTransport({ command: process.execPath, args: [join(import.meta.dir, "..", "src", "mcp-bridge.ts")], env: { ...(process.env as Record<string, string>), ORG_SOCKET: server.organization.socketPath, ORG_TOKEN: siblingRuntime.token } }));
+  try {
+    for (const [name, args] of [
+      ["completion_get", { batchId: inner.identity.rootOperationId, after: 0, limit: 1 }],
+      ["operation_get", { operationId: inner.memberOperationIds[0] }],
+      ["operation_get", { operationId: outerBatch().continuationOperationId }],
+    ] as const) expect((await siblingMcp.callTool({ name, arguments: args })).isError).toBe(true);
+  } finally { await siblingMcp.close(); }
+  // Trusted clients and an authorized ancestor retain access to original results.
+  expect(await client.request("completion.get", { batchId: inner.identity.rootOperationId, after: 0, limit: 1 })).toBeTruthy();
+  const rootRuntime = (server.organization as any).runtimes.get(root.id);
+  const ancestorClient = await OrganizationClient.connect(join(dir, "server.sock"), rootRuntime.token);
+  clients.push(ancestorClient);
+  expect((await ancestorClient.request<Operation>("operation.get", { operationId: inner.memberOperationIds[0] })).status).toBe("completed");
+  await Bun.write(join(dir, `continuation-${parent.id}.release`), "release");
+  await until(() => outerBatch().state === "dispatched");
+  const outerQuery = JSON.parse(await Bun.file(join(dir, `completion-query-${parent.id}.json`)).text());
+  expect(outerQuery.members).toHaveLength(1);
+  expect(outerQuery.members[0].status).toBe("completed");
+  expect(outerQuery.members[0].result.text).toBe("done:chain-mid");
+  expect(server.organization.store.pinnedOperationIds()).toHaveLength(0);
+  for (const batchId of [inner.identity.rootOperationId, parent.id]) {
+    expect(server.organization.store.history(0, 10000).events.filter(event => event.type === "completion.dispatch_started" && (event.data as any).batchId === batchId)).toHaveLength(1);
+  }
+  await client.wait(siblingWork);
 });
 
 test("failed initialization preserves completion obligations until successful recovery", async () => {

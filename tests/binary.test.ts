@@ -52,17 +52,32 @@ host.validateLaunch(spec=>{writeFileSync(${JSON.stringify(launchFile)},JSON.stri
     expect(unknown.status).toBe('failed');
     expect(unknown.error?.code).toBe('INVALID_HARNESS');
     const creation = await client.wait(await client.request<Operation>("agent.create", {
-      settings: { harness: "fixture", model: "test-model", extensions: { demo: { selected: true } } },
+      settings: { harness: "fixture", model: "test-model", env: { COMPLETION_QUERY_DIR: dir }, extensions: { demo: { selected: true } } },
     }));
     expect(creation.status).toBe("completed");
     const agent = creation.result as AgentRecord;
+    const rootBridge = JSON.parse(await readFile(bridgeFile, 'utf8'));
     const transformed = JSON.parse(await readFile(launchFile, 'utf8'));
     expect(transformed.env.DEMO_RESOURCE).toBe('explicit');
     expect(transformed.env.DEMO_TRANSFORM).toBe('applied');
     expect(agent.settings.extensions).toEqual({ demo: { selected: true } });
     const prompt = await client.wait(await client.request<Operation>("agent.prompt", { agentId: agent.id, text: "hello" }));
     expect(prompt.status).toBe("completed");
-    const bridge = JSON.parse(await readFile(bridgeFile, 'utf8'));
+    const delegated = await client.wait(await client.request<Operation>("agent.prompt", { agentId: agent.id, text: "chain-root" }));
+    expect(delegated.status).toBe("completed");
+    const pageDeadline = Date.now() + 8000;
+    let completion: any;
+    while (Date.now() < pageDeadline) {
+      completion = await client.request<any>("completion.get", { batchId: delegated.id, after: 0, limit: 10 });
+      if (completion.state === "dispatched" || completion.s === "suppressed") break;
+      await Bun.sleep(20);
+    }
+    expect(completion.state ?? completion.s).toBe("dispatched");
+    const queried = JSON.parse(await readFile(join(dir, `completion-query-${delegated.id}.json`), "utf8"));
+    expect(queried.batchId).toBe(delegated.id);
+    expect(queried.members).toHaveLength(1);
+    expect(queried.members[0].result.text).toBe("done:chain-mid");
+    const bridge = rootBridge;
     expect(bridge.command).toBe(binary);
     expect(bridge.args).toEqual(['--internal-mcp-bridge']);
     mcp = new Client({ name: "binary-test", version: "1" });

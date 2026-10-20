@@ -18,7 +18,7 @@ const server = new Server(
   {
     capabilities: { tools: {} },
     instructions:
-      "Manage your direct children and coordinate descendants. Lifecycle and prompt calls return operations: wait/query to obtain results. You cannot manage ancestors, siblings, or yourself. Keep a prompt slot free for descendants while waiting.",
+      "Manage your direct children and coordinate descendants. descendant_prompt returns an operation immediately; a fire-and-return prompt releases its slot so eligible parent-completion work can run automatically when the enrolled descendant subtree settles. Completion batches are scoped to the issuing parent session/root prompt and relevant descendants; use completion_get for your own batch metadata and operation_get for authorized original results. You cannot manage ancestors, siblings, or yourself. Keep a prompt slot free for descendants while waiting: a coordinator waiting on work queued behind itself can deadlock."
   },
 );
 server.setRequestHandler(ListToolsRequestSchema, () =>
