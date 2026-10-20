@@ -538,7 +538,7 @@ export class Organization implements PluginHost {
         if (!terminal(op))
           this.finish(
             op,
-            this.store.completionBatchForOperation(op.id) ? "interrupted" : "stopped",
+            this.store.completionBatchForOperation(op.id) && !op.cancelRequested ? "interrupted" : "stopped",
             undefined,
             new ApiError("INTERRUPTED", "Server restarted"),
           );
@@ -607,11 +607,21 @@ export class Organization implements PluginHost {
       else if (recipient.state === "failed") this.store.suppressCompletion(batch, "recipient-failed");
       else if (!this.runtimes.has(recipient.id) && !["stopped", "recovering", "starting"].includes(recipient.state)) this.store.suppressCompletion(batch, "no-live-recipient");
     }
-    // Nested recipient suppression can unblock its ancestor. Iterate over the finite
-    // durable batch set to a fixed point before dispatching anything this turn.
-    const maxPasses = this.store.completionBatches().length + 1;
-    for (let pass = 0; pass < maxPasses; pass++) if (!this.reconcileCompletionBatches()) break;
-    for (const batch of this.store.completionBatches()) if (batch.state === "ready") this.dispatchCompletionBatch(batch);
+    // Suppression may happen during dispatch (notably prompt-budget fallback) and
+    // unblock an ancestor. Stabilize readiness both before and after each finite
+    // dispatch wave; each batch can make at most one forward transition per turn.
+    const maxRounds = this.store.completionBatches().length + 1;
+    for (let round = 0; round < maxRounds; round++) {
+      const maxPasses = this.store.completionBatches().length + 1;
+      for (let pass = 0; pass < maxPasses; pass++) if (!this.reconcileCompletionBatches()) break;
+      let progressed = false;
+      for (const batch of this.store.completionBatches()) if (batch.state === "ready") {
+        const previousState = batch.state, previouslySuppressed = batch.dispatchSuppressed;
+        this.dispatchCompletionBatch(batch);
+        if (batch.state !== previousState || batch.dispatchSuppressed !== previouslySuppressed) progressed = true;
+      }
+      if (!progressed) break;
+    }
   }
   private suppressRecipientBatches(agentId: string, reason: string) {
     for (const batch of this.store.completionBatches())

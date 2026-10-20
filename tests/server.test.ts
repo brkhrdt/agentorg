@@ -437,6 +437,28 @@ test("completion dispatch does not preempt competing parent work and restores ma
   expect(server.organization.operations.get(batch().continuationOperationId!)?.status).toBe("completed");
 });
 
+test("startup preserves persisted cancellation intent and never replays the delivery", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "org-cancel-recovery-")); dirs.push(dir);
+  const store = new Store(join(dir, "organization.sqlite"));
+  const root: AgentRecord = { id: "cancel-root", parentId: null, name: "root", metadata: {}, settings: { harness: "fixture", options: {} }, state: "running", revision: 1, generation: "old", sessionId: "cancel-session", sessionNumber: 1, removedAt: null, createdAt: now(), updatedAt: now() };
+  store.saveAgent(root);
+  const batchId = crypto.randomUUID();
+  const member: Operation = { id: crypto.randomUUID(), type: "agent.prompt", agentId: root.id, input: {}, caller: { kind: "server", id: "test" }, status: "completed", createdAt: now(), completedAt: now(), result: "retained" };
+  expect(store.admitCompletionOperation(member, { parentAgentId: root.id, parentSessionId: root.sessionId, rootOperationId: batchId }, [root.id], 4)).toBe(true);
+  const continuation: Operation = { id: crypto.randomUUID(), type: "agent.prompt", agentId: root.id, input: { text: `Review child completion batch ${batchId}` }, caller: { kind: "server", id: "server" }, status: "running", createdAt: now(), cancelRequested: true };
+  store.saveOperation(continuation);
+  const batch = store.completionBatches()[0]!; batch.state = "dispatching"; batch.continuationOperationId = continuation.id; store.setCompletionBatch(batch);
+  store.close();
+  const server = await OrganizationServer.start({ dataDir: dir, socketPath: join(dir, "server.sock"), plugins: [fixture] });
+  servers.push(server);
+  const done = server.organization.store.completionBatches()[0]!;
+  expect(server.organization.operations.get(continuation.id)?.status).toBe("stopped");
+  expect(done).toMatchObject({ state: "dispatched", deliveryResolution: "cancelled" });
+  expect(done.continuationOperationId).toBe(continuation.id);
+  expect(server.organization.store.pinnedOperationIds()).toHaveLength(0);
+  expect([...server.organization.operations.values()].filter(operation => operation.id !== continuation.id && (operation.input as any)?.text?.includes(batchId))).toHaveLength(0);
+});
+
 test("failed initialization preserves completion obligations until successful recovery", async () => {
   const dir = mkdtempSync(join(tmpdir(), "org-init-completion-"));
   dirs.push(dir);
@@ -489,6 +511,28 @@ test("nested unavailable recipient suppression unblocks ancestor in the same rec
   const outer = server.organization.store.completionBatches().find(item => item.identity.rootOperationId === outerId)!;
   expect(outer.deliveryResolution).toBe("delivered");
   expect(outer.dispatchSuppressed).toBeUndefined();
+  expect(server.organization.store.pinnedOperationIds()).toHaveLength(0);
+});
+
+test("nested prompt-budget suppression stabilizes ancestors without stranded pins", async () => {
+  const { client, server } = await setup();
+  const root = await create(client), child = await create(client, root.id);
+  const outerId = crypto.randomUUID(), innerId = crypto.randomUUID();
+  const addMember = (parent: AgentRecord, batchId: string, target: string) => {
+    const member: Operation = { id: crypto.randomUUID(), type: "agent.prompt", agentId: target, input: {}, caller: { kind: "server", id: "nested-budget" }, status: "completed", createdAt: now(), completedAt: now(), result: "settled" };
+    expect(server.organization.store.admitCompletionOperation(member, { parentAgentId: parent.id, parentSessionId: parent.sessionId, rootOperationId: batchId }, [target], 8)).toBe(true);
+    server.organization.operations.set(member.id, member);
+  };
+  addMember(root, outerId, child.id); addMember(child, innerId, child.id);
+  for (const id of [outerId, innerId]) {
+    const batch = server.organization.store.completionBatches().find(item => item.identity.rootOperationId === id)!;
+    batch.state = "ready"; server.organization.store.setCompletionBatch(batch);
+  }
+  (server.organization as any).limits.maxPromptBytes = 128;
+  (server.organization as any).reconcileAndDispatchCompletionBatches();
+  const batches = server.organization.store.completionBatches();
+  expect(batches.find(item => item.identity.rootOperationId === innerId)).toMatchObject({ state: "dispatched", dispatchSuppressed: true, suppressionReason: "prompt-budget" });
+  expect(batches.find(item => item.identity.rootOperationId === outerId)).toMatchObject({ state: "dispatched", dispatchSuppressed: true, suppressionReason: "prompt-budget" });
   expect(server.organization.store.pinnedOperationIds()).toHaveLength(0);
 });
 
