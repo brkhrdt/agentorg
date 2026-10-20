@@ -789,6 +789,30 @@ test("completion.ready diagnostic failure does not block dispatch or release pin
   expect(server.organization.store.history(0, 10000).events.filter(event => event.type === "completion.dispatch_started" && (event.data as any).batchId === parent.id)).toHaveLength(1);
 });
 
+test("failed completion dispatch retries after storage recovery and heals serialized mutations", async () => {
+  const { client, server } = await setup();
+  const root = await create(client);
+  const store = server.organization.store;
+  const dispatch = store.dispatchCompletion.bind(store);
+  let attempts = 0;
+  (store as any).dispatchCompletion = (...args: any[]) => { attempts++; return (dispatch as any)(...args); };
+  store.db.exec(`CREATE TRIGGER reject_completion_dispatch BEFORE INSERT ON operations WHEN json_extract(NEW.data, '$.caller.id')='server' AND json_extract(NEW.data, '$.input.text') LIKE 'Review child completion batch%' BEGIN SELECT RAISE(ABORT, 'injected dispatch transaction failure'); END`);
+  const parent = await client.wait(await prompt(client, root.id, "delegate-return"));
+  const findBatch = () => store.completionBatches().find(batch => batch.identity.rootOperationId === parent.id)!;
+  await until(() => findBatch()?.state === "ready" && attempts > 0);
+  expect(findBatch().continuationOperationId).toBeUndefined();
+  store.db.exec("DROP TRIGGER reject_completion_dispatch");
+  await until(() => findBatch()?.state === "dispatched");
+  const batch = findBatch();
+  expect(server.organization.operations.get(batch.continuationOperationId!)?.status).toBe("completed");
+  expect(store.pinnedOperationIds()).toHaveLength(0);
+  expect(store.history(0, 10000).events.filter(event => event.type === "completion.dispatch_started" && (event.data as any).batchId === parent.id)).toHaveLength(1);
+  const updated = await client.request<any>("organization.settings.update", { namespace: "core", expectedRevision: 0, patch: { maxDepth: 7 } });
+  expect(updated.values.maxDepth).toBe(7);
+  await Bun.sleep(60);
+  expect(store.history(0, 10000).events.filter(event => event.type === "completion.dispatch_started" && (event.data as any).batchId === parent.id)).toHaveLength(1);
+});
+
 test("continuation start persistence failure retains queue ownership and retries after storage recovers", async () => {
   const { client, server } = await setup();
   const root = await create(client);

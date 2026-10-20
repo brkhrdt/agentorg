@@ -115,6 +115,8 @@ export class Organization implements PluginHost {
   private shutdownHooks: Array<() => void | Promise<void>> = [];
   private permissions = new Map<string, Permission>();
   private tail: Promise<unknown> = Promise.resolve();
+  private completionRetryTimer?: ReturnType<typeof setTimeout>;
+  private completionRetryAttempts = 0;
   private closing = false;
   private initialized = false;
   private closePromise?: Promise<void>;
@@ -372,15 +374,18 @@ export class Organization implements PluginHost {
   }
   private serialize<T>(fn: () => T | Promise<T>): Promise<T> {
     const result = this.tail.then(() => this.mutationContext.run(true, fn));
-    this.tail = result
-      .catch(() => {})
-      .finally(() => {
-        if (!this.closing) {
-          this.pump();
-          this.reconcileCompletionBatches();
-          for (const batch of this.store.completionBatches()) if (batch.state === "ready") this.dispatchCompletionBatch(batch);
-        }
-      });
+    // Keep the mutation chain fulfilled even if post-operation scheduling/reconciliation
+    // encounters transient storage errors. The caller still receives `result` unchanged.
+    this.tail = result.catch(() => {}).then(() => {
+      if (this.closing) return;
+      try { this.pump(); } catch { /* active work has its own retry path */ }
+      try {
+        this.reconcileAndDispatchCompletionBatches();
+        this.completionRetryAttempts = 0;
+      } catch {
+        this.scheduleCompletionRetry();
+      }
+    }).catch(() => {});
     return result;
   }
   private saveAgent(a: AgentRecord) {
@@ -570,6 +575,19 @@ export class Organization implements PluginHost {
       this.emit("server.ready", { recover, limits: this.limits });
       this.reconcileCompletionBatches();
     });
+  }
+  private scheduleCompletionRetry() {
+    if (this.closing || this.completionRetryTimer || this.completionRetryAttempts >= 5) return;
+    const delay = Math.min(1000, 25 * 2 ** this.completionRetryAttempts++);
+    this.completionRetryTimer = setTimeout(() => {
+      this.completionRetryTimer = undefined;
+      if (this.closing) return;
+      void this.serialize(() => this.reconcileAndDispatchCompletionBatches());
+    }, delay);
+  }
+  private reconcileAndDispatchCompletionBatches() {
+    this.reconcileCompletionBatches();
+    for (const batch of this.store.completionBatches()) if (batch.state === "ready") this.dispatchCompletionBatch(batch);
   }
   /** Evaluate only enrolled roots, deepest first, once serialized state has settled. */
   private reconcileCompletionBatches() {
@@ -1776,6 +1794,8 @@ export class Organization implements PluginHost {
   close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
     this.closing = true;
+    if (this.completionRetryTimer) clearTimeout(this.completionRetryTimer);
+    this.completionRetryTimer = undefined;
     this.closePromise = this.serialize(async () => {
       for (const a of [...this.agents.values()]
         .filter((a) => this.runtimes.has(a.id))
