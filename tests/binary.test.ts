@@ -83,8 +83,8 @@ host.validateLaunch(spec=>{writeFileSync(${JSON.stringify(launchFile)},JSON.stri
     mcp = new Client({ name: "binary-test", version: "1" });
     await mcp.connect(new StdioClientTransport({ command: bridge.command, args: bridge.args, cwd: dir,
       env: { PATH: dir, ...Object.fromEntries(bridge.env.map((entry: {name:string;value:string}) => [entry.name, entry.value])) } }));
-    expect((await mcp.listTools()).tools.some(tool => tool.name === "child_create")).toBe(true);
-    expect((await mcp.callTool({ name: "organization_snapshot", arguments: {} })).isError).not.toBe(true);
+    expect((await mcp.listTools()).tools.some(tool => tool.name === "create_subagent")).toBe(true);
+    expect((await mcp.callTool({ name: "snapshot_organization", arguments: {} })).isError).not.toBe(true);
     await mcp.close(); mcp = undefined;
     client.close(); client = undefined;
     server.kill("SIGTERM");

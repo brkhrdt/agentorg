@@ -40,13 +40,13 @@ test("completion pins stay out of lightweight snapshots while active descendant 
     expect(full).not.toHaveProperty("completionBatches");
 
     const rootClient = await connect(tokens.get(root.id));
-    const rootLite: any = JSON.parse((await rootClient.request<any>("mcp.call", { name: "organization_snapshot", arguments: { includeTerminalOperations: false } })).content[0].text);
+    const rootLite: any = JSON.parse((await rootClient.request<any>("mcp.call", { name: "snapshot_organization", arguments: { includeTerminalOperations: false } })).content[0].text);
     expect(rootLite.operations.map((op: Operation) => op.id)).toContain(continuation.id);
     const childClient = await connect(tokens.get(child.id));
-    const childLite: any = JSON.parse((await childClient.request<any>("mcp.call", { name: "organization_snapshot", arguments: { includeTerminalOperations: false } })).content[0].text);
+    const childLite: any = JSON.parse((await childClient.request<any>("mcp.call", { name: "snapshot_organization", arguments: { includeTerminalOperations: false } })).content[0].text);
     expect(childLite.operations.map((op: Operation) => op.id)).not.toContain(continuation.id);
     const siblingClient = await connect(tokens.get(sibling.id));
-    const siblingLite: any = JSON.parse((await siblingClient.request<any>("mcp.call", { name: "organization_snapshot", arguments: { includeTerminalOperations: false } })).content[0].text);
+    const siblingLite: any = JSON.parse((await siblingClient.request<any>("mcp.call", { name: "snapshot_organization", arguments: { includeTerminalOperations: false } })).content[0].text);
     expect(siblingLite.operations.map((op: Operation) => op.id)).not.toContain(continuation.id);
     const page = await client.request<any>("completion.get", { batchId, after: 0, limit: 1 });
     expect(page.items?.[0]?.operationId ?? page.i?.[0]?.o).toBe(pinned.id);
@@ -90,7 +90,7 @@ test("lightweight snapshots retain active operations without resending terminal 
       expect(Buffer.byteLength(JSON.stringify(snapshot))).toBeLessThan(32768);
     }
     const agentClient = await connect(tokens.get(root.id));
-    const mcp: any = await agentClient.request("mcp.call", { name: "organization_snapshot", arguments: { includeTerminalOperations: false } });
+    const mcp: any = await agentClient.request("mcp.call", { name: "snapshot_organization", arguments: { includeTerminalOperations: false } });
     // Agent callers still cannot manage/read the client's operation on themselves.
     expect(JSON.parse(mcp.content[0].text).operations).toEqual([]);
     await expect(client.request("organization.snapshot", { includeTerminalOperations: "false" })).rejects.toMatchObject({ code: "INVALID_PARAMS" });
