@@ -30,11 +30,11 @@ async function inspectCompletionBatch(batchId: string) {
     let after = 0;
     const members: Array<{ operationId: string; status: string; resultAvailable: boolean; result: unknown }> = [];
     for (;;) {
-      const page = await call("completion_get", { batchId, after, limit: 2 });
+      const page = await call("get_completion", { batchId, after, limit: 2 });
       const items = page.items ?? page.i ?? [];
       for (const item of items) {
         const operationId = item.operationId ?? item.o;
-        const query = await call("operation_get", { operationId, resultOnly: true });
+        const query = await call("get_operation", { operationId, resultOnly: true });
         members.push({ operationId, status: query.s, resultAvailable: query.a, result: query.r });
       }
       const next = page.next ?? page.n;
@@ -125,7 +125,7 @@ acp
         };
         const children: string[] = [];
         for (const name of ["code", "tests"]) {
-          let op = (await call("child_create", {
+          let op = (await call("create_subagent", {
             name,
             settings: { harness: "fixture", model: "gpt-6-luna" },
           })) as Operation;
@@ -134,7 +134,7 @@ acp
             throw new Error(JSON.stringify(op.error));
           children.push((op.result as AgentRecord).id);
         }
-        const issued = await Promise.all(children.map((agentId, i) => call("descendant_prompt", {
+        const issued = await Promise.all(children.map((agentId, i) => call("prompt_subagent", {
           agentId, text: i ? "tests done" : "code done",
         })));
         if (text === "delegate") await Promise.all(issued.map(async (op: Operation) => {
@@ -158,14 +158,14 @@ acp
         const names = text === "chain-root" ? ["middle"] : ["leaf", "failing-leaf"];
         const targetIds: string[] = [];
         for (const name of names) {
-          const childOp = await call("child_create", { name, settings: { harness: "fixture", env: { COMPLETION_QUERY_DIR: process.env.COMPLETION_QUERY_DIR } } });
-          const childDone = await call("operation_wait", { operationId: childOp.id, waitMs: 5000 });
+          const childOp = await call("create_subagent", { name, settings: { harness: "fixture", env: { COMPLETION_QUERY_DIR: process.env.COMPLETION_QUERY_DIR } } });
+          const childDone = await call("wait_operation", { operationId: childOp.id, waitMs: 5000 });
           if (childDone.status !== "completed") throw new Error(JSON.stringify(childDone.error));
           targetIds.push(childDone.result.id);
         }
         for (const [index, targetId] of targetIds.entries()) {
-          const promptOp = await call("descendant_prompt", { agentId: targetId, text: text === "chain-root" ? "chain-mid" : index === 0 ? "chain-leaf" : "crash" });
-          if (!promptOp.id) throw new Error("descendant_prompt returned no operation id");
+          const promptOp = await call("prompt_subagent", { agentId: targetId, text: text === "chain-root" ? "chain-mid" : index === 0 ? "chain-leaf" : "crash" });
+          if (!promptOp.id) throw new Error("prompt_subagent returned no operation id");
         }
       } finally { await mcp.close(); }
     }

@@ -17,7 +17,7 @@ function emit(store: Store, type: string, data: unknown, agentId = "agent", gene
 }
 const command = "PYTHONPATH=src python -m unittest discover -s tests && PYTHONPATH=src python -m adder 2 3.5";
 
-for (const tool of ["bash", "read", "write", "edit", "mcp__organization__child_create"]) {
+for (const tool of ["bash", "read", "write", "edit", "mcp__agentorg__create_subagent"]) {
   test(`${tool}: sparse ACP phases keep the same tree identity, with errors/output confined to details`, () => fixture(store => {
     const input = tool === "bash" ? { command } : tool === "edit" ? { path: "a.py", edits: [{ oldText: "old", newText: "new" }] } : { path: "a.py", content: "hello" };
     const call = emit(store, "tool.call", { toolCallId: "one", title: tool, rawInput: input, status: "in_progress" });

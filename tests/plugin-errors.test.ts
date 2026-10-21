@@ -67,7 +67,7 @@ test("endpoint, tool, observer, shutdown and emitted diagnostics retain plugin i
     await org.use({ apiVersion: 1, name: "demo", setup(host) {
       host.registerEndpoint("demo.fail", async () => { throw new ApiError("CONFLICT", "endpoint failed"); });
       host.registerTool({ name: "demo_fail", description: "test", inputSchema: { type: "object" }, execute() { throw new Error("tool failed"); } });
-      host.transformTool("agent_get", tool => ({ ...tool, execute() { throw new Error("transform failed"); } }));
+      host.transformTool("get_subagent", tool => ({ ...tool, execute() { throw new Error("transform failed"); } }));
       host.onEvent(async event => { if (event.type === "test.event") throw new Error("observer failed"); });
       host.onShutdown(() => { throw new Error("shutdown failed"); });
       host.emit("demo.warning", { message: "warning", extra: 1 });
@@ -76,7 +76,7 @@ test("endpoint, tool, observer, shutdown and emitted diagnostics retain plugin i
       host.emit("demo.info", { message: "not a diagnostic" });
     } });
     await expect(org.request("demo.fail", {})).rejects.toThrow("demo: endpoint failed");
-    for (const [name, message] of [["demo_fail", "tool failed"], ["agent_get", "transform failed"]]) {
+    for (const [name, message] of [["demo_fail", "tool failed"], ["get_subagent", "transform failed"]]) {
       const result = await org.request("mcp.call", { name, arguments: {} }, { kind: "agent", id: "test" }) as any;
       expect(result.isError).toBe(true);
       expect(JSON.parse(result.content[0].text)).toEqual({ code: "INTERNAL", message: `demo: ${message}` });

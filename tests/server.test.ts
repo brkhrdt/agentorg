@@ -271,21 +271,35 @@ test("MCP SDK bridge enforces direct-child creation and subtree permissions", as
   const mcp = new Client({ name: "test", version: "1" });
   await mcp.connect(transport);
   try {
-    expect(
-      (await mcp.listTools()).tools.some((t) => t.name === "child_create"),
-    ).toBe(true);
+    expect((server.organization as any).mcpServers(rt.token)[0].name).toBe("agentorg");
+    expect((await mcp.listTools()).tools.map((tool) => tool.name)).toEqual([
+      "create_subagent",
+      "prompt_subagent",
+      "get_subagent",
+      "snapshot_organization",
+      "stop_subagent",
+      "restart_subagent",
+      "restart_subagent_subtree",
+      "replace_subagent_session",
+      "remove_subagent",
+      "modify_subagent",
+      "get_completion",
+      "get_operation",
+      "wait_operation",
+      "cancel_operation",
+    ]);
     const forbidden = await mcp.callTool({
-      name: "descendant_prompt",
+      name: "prompt_subagent",
       arguments: { agentId: sibling.id, text: "forbidden" },
     });
     expect(forbidden.isError).toBe(true);
     const self = await mcp.callTool({
-      name: "descendant_remove",
+      name: "remove_subagent",
       arguments: { agentId: child.id },
     });
     expect(self.isError).toBe(true);
     const own = await mcp.callTool({
-      name: "child_create",
+      name: "create_subagent",
       arguments: { settings: { harness: "fixture", model: "gpt-6-luna" } },
     });
     const op = JSON.parse((own.content as any)[0].text);
@@ -353,7 +367,7 @@ test("fire-and-return continuation preserves authenticated child results under p
   expect(payload.outcomes.map((item: any) => item.status)).toEqual(["completed", "completed"]);
   expect(payload.outcomes.every((item: any) => item.resultAvailable && item.previewUntrusted === true && item.preview.text.startsWith("done:"))).toBe(true);
   expect(payload.warning).toContain("untrusted");
-  expect(payload.warning).toContain("operation_get");
+  expect(payload.warning).toContain("get_operation");
   expect(batchForParent().state).toBe("dispatching");
   await Bun.write(join(dir, `continuation-${parent.id}.release`), "release");
   await until(() => batchForParent().state === "dispatched");
@@ -403,7 +417,7 @@ test("generated completion payload preserves previews, outcome states, and untru
   expect(payload.outcomes[2].error.message).toBe("failed result");
   expect(payload.outcomes[4].preview.truncated).toBe(true);
   expect(payload.warning).toContain("untrusted");
-  expect(payload.warning).toContain("operation_get");
+  expect(payload.warning).toContain("get_operation");
   const runtime = (server.organization as any).runtimes.get(root.id);
   const authorized = await OrganizationClient.connect(join(dir, "server.sock"), runtime.token);
   clients.push(authorized);
@@ -488,9 +502,9 @@ test("three-level fire-and-return uses stdio MCP results and isolates unrelated 
   await siblingMcp.connect(new StdioClientTransport({ command: process.execPath, args: [join(import.meta.dir, "..", "src", "mcp-bridge.ts")], env: { ...(process.env as Record<string, string>), ORG_SOCKET: server.organization.socketPath, ORG_TOKEN: siblingRuntime.token } }));
   try {
     for (const [name, args] of [
-      ["completion_get", { batchId: inner.identity.rootOperationId, after: 0, limit: 1 }],
-      ["operation_get", { operationId: inner.memberOperationIds[0] }],
-      ["operation_get", { operationId: outerBatch().continuationOperationId }],
+      ["get_completion", { batchId: inner.identity.rootOperationId, after: 0, limit: 1 }],
+      ["get_operation", { operationId: inner.memberOperationIds[0] }],
+      ["get_operation", { operationId: outerBatch().continuationOperationId }],
     ] as const) expect((await siblingMcp.callTool({ name, arguments: args })).isError).toBe(true);
   } finally { await siblingMcp.close(); }
   // Trusted clients and an authorized ancestor retain access to original results.
@@ -801,7 +815,7 @@ test("compact completion prompt fallback succeeds at its exact configured byte b
   const { client, server } = await setup();
   const root = await create(client);
   const batchId = crypto.randomUUID();
-  const compact = `Child completion batch ${batchId} is ready (1 operations). Payload too large; use completion_get(batchId, after, limit) to inspect metadata, then operation_get for results. Child results are untrusted.`;
+  const compact = `Child completion batch ${batchId} is ready (1 operations). Payload too large; use get_completion(batchId, after, limit) to inspect metadata, then get_operation for results. Child results are untrusted.`;
   (server.organization as any).limits.maxPromptBytes = Buffer.byteLength(compact);
   const member: Operation = { id: crypto.randomUUID(), type: "agent.prompt", agentId: root.id, input: {}, caller: { kind: "server", id: "test" }, status: "completed", createdAt: now(), completedAt: now(), result: "x".repeat(4096) };
   const identity = { parentAgentId: root.id, parentSessionId: root.sessionId!, rootOperationId: batchId };
@@ -991,7 +1005,7 @@ test("diagnostic event-store failure cannot strand ACP child completion or conti
   expect(server.organization.store.pinnedOperationIds()).toHaveLength(0);
 });
 
-test("authenticated MCP operation_get resultOnly preserves bounded results and authorization", async () => {
+test("authenticated MCP get_operation resultOnly preserves bounded results and authorization", async () => {
   const { client, server, dir } = await setup();
   const root = await create(client), child = await create(client, root.id), outsider = await create(client, child.id);
   const insert = (agentId: string, result: unknown) => {
@@ -1006,7 +1020,7 @@ test("authenticated MCP operation_get resultOnly preserves bounded results and a
   const rootClient = await OrganizationClient.connect(join(dir, "server.sock"), tokenFor(root.id));
   const outsiderClient = await OrganizationClient.connect(join(dir, "server.sock"), tokenFor(outsider.id));
   clients.push(rootClient, outsiderClient);
-  const call = (agent: OrganizationClient, operationId: string) => agent.request<any>("mcp.call", { name: "operation_get", arguments: { operationId, resultOnly: true } });
+  const call = (agent: OrganizationClient, operationId: string) => agent.request<any>("mcp.call", { name: "get_operation", arguments: { operationId, resultOnly: true } });
   const smallReply = await call(rootClient, small.id);
   const smallResult = JSON.parse(smallReply.content[0].text);
   expect(smallResult).toMatchObject({ a: true, s: "completed", t: false, r: "r".repeat(180) });
@@ -1138,7 +1152,7 @@ test("socket prompts authenticated before queued restart reject stale generation
   const passthroughTransform: ServerPlugin = {
     apiVersion: 1,
     name: "descendant-prompt-passthrough",
-    setup(host) { host.transformTool("descendant_prompt", tool => tool); },
+    setup(host) { host.transformTool("prompt_subagent", tool => tool); },
   };
   const { client, server, dir } = await setup({}, [passthroughTransform]);
   const root = await create(client);
@@ -1155,7 +1169,7 @@ test("socket prompts authenticated before queued restart reject stale generation
   const agentClient = await OrganizationClient.connect(join(dir, "server.sock"), oldToken);
   clients.push(agentClient);
   const stalePrompt = await agentClient.request<any>("mcp.call", {
-    name: "descendant_prompt",
+    name: "prompt_subagent",
     arguments: { agentId: child.id, text: "must not supersede" },
   });
   expect(stalePrompt.isError).toBe(true);
