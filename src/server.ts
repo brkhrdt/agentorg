@@ -99,6 +99,7 @@ export class OrganizationServer {
       instance = new OrganizationServer(options, lock);
       for (const plugin of options.plugins)
         await instance.organization.use(plugin);
+      instance.organization.validateRendererRegistrations();
       mkdirSync(dirname(instance.socketPath), { recursive: true, mode: 0o700 });
       try {
         const stat = lstatSync(instance.socketPath);

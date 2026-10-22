@@ -72,13 +72,28 @@ for descriptors, validation, migrations and client APIs.
 
 ## Event renderers (presentation contract v1)
 
-API v1 adds optional `HarnessPlugin.renderers` and `host.registerRenderer()`.
+API v1 adds optional `HarnessPlugin.renderers`, `host.registerRenderer()` for selectable default candidates, and `host.registerToolRenderer()` for automatic canonical per-tool renderers.
 Existing harnesses need no changes. Renderers run **only on the trusted server**;
 clients receive Markdown and JSON metadata, never callbacks or Pi TUI components.
 A harness can customize **any event type** associated with its agents, not just
 calls/results. Tool-specific matches use `data.toolName`, then `data.title`, never
 the broad ACP `kind` (`edit`, `read`, etc.). Adapters should retain exact identity
-and arguments on updates/results too. For sparse ACP updates, core recovers
+and arguments on updates/results too. Harnesses may declare `toolAliases` as an
+explicit emitted-identity → canonical-identity map or deterministic factory (for example,
+`mcp__agentorg__get_operation` → `get_operation`); there is no global suffix guessing.
+Selection for tool events is exact harness tool identity, automatic canonical per-tool
+renderer, selected default, then generic. Harness-wide tool renderers do not preempt
+canonical renderers. Non-tool events retain harness type-wide matches. A plugin adding
+an MCP tool registers its renderer with `registerToolRenderer`; duplicate overlapping
+registrations are rejected. Raw
+event identity/subtype and arguments remain unchanged. The core formatter gives all
+14 AgentOrg MCP coordination tools stable action headings (for example, “Create
+child request” and “Remove subtree agent …”) while keeping raw arguments/results
+available in full rendering. Headings describe requests, not successful completion: create remains a
+request until a child ID appears in the actual result (the initial lifecycle operation's
+`agentId` can be the parent). Invocation outcome is distinct from returned operation,
+agent, and completion states; cancellation requested is distinct from terminal status.
+Dynamic states/counts and truncation warnings belong in extended/full details. For sparse ACP updates, core recovers
 presentation-only identity/arguments from retained events matching agent,
 generation and toolCallId, without crossing prompt/session boundaries or using
 future records. This also works for paginated history and older adapters. Status
@@ -101,20 +116,19 @@ host.registerHarness({ name: "my-harness", renderers: [readRenderer], launch });
 host.registerRenderer({ ...readRenderer, id: "my-plugin.read" });
 ```
 
-A callback receives a detached event and returns `{summary, extended, full}`
-(with optional additive `extendedDiff` semantic spans):
+A callback receives a detached event with its original identity/arguments and returns `{summary, extended, full}` (with optional `extendedDiff`, `updateMode: 'semantic' | 'streaming'`, and `extendedLayout: 'header-detail'` semantic hints):
 
 - `summary`: exactly one nonempty logical line; used in the tree regardless of chat level.
 - `extended`: at most two logical lines. Clients may wrap these onto more screen rows.
-- `full`: all relevant available content, including status/errors and partial/truncation markers.
+- `full`: all relevant available content, including invocation and domain states, exact emitted tool identity, arguments, results/errors and partial/truncation markers.
+- `updateMode: 'streaming'` opts into bounded rolling output tails; `semantic` tells clients to preserve the renderer's status/details instead of replacing them with raw output.
+- `extendedLayout: 'header-detail'` asks the TUI to bound the heading and priority detail independently, retaining status in the second row on narrow terminals.
 - **Raw is not a callback output.** It is always the complete original event envelope.
 
 Return Markdown without ANSI escapes, terminal commands, HTML-dependent styling,
 or client-specific markup. Clients own sanitization, colors, wrapping and clipping.
 Use fenced code/diff blocks for literal content; the public `fenced()` helper
-handles embedded backticks. `renderTool()` supplies portable read/bash/edit/write
-styles and a generic unknown-tool representation. Headers use `$` for bash,
-`<` for read, `>` for write, `Δ` for edit, and `• toolname` for unknown tools.
+handles embedded backticks. `renderGenericTool()` supplies the core fallback. `renderTool()` remains as a deprecated compatibility helper for older native-tool adapters; new harnesses own native formatting. The Pi plugin owns its read/bash/edit/write styles. Core owns stable semantic presentations for its fourteen public MCP tools.
 Routine phase/status strings and repeated argument JSON are omitted. The
 summary/header retains the same command or path across call/update/result:
 only the **symbol** changes lifecycle color (yellow/orange/green or red), not the
@@ -152,11 +166,7 @@ with raw fallback. Unchanged distant content and duplicate raw argument dumps
 are not included in normal full output. Clients color fenced `diff` additions and
 removals locally, independently of the lifecycle symbol color.
 
-Resolution: matching current-agent harness renderer (exact tool matches before
-type-wide matches, then registration order), then the configured server-default
-candidate, then `generic`. The built-in `core.tools` candidate distinguishes
-read/bash/edit/write; unknown tools use generic fields. Non-tool events retain
-client generic rendering unless their harness explicitly matches them. Harness
+Resolution for tool events: exact current-harness emitted-identity renderer, automatic canonical per-tool renderer, configured server-default candidate, then `generic`. Canonical MCP renderers are not selectable global defaults. Non-tool events retain harness-specific matches or client generic rendering. Harness
 IDs are **not persisted on events**: changing an agent's harness, server default,
 or renderer implementation may change rendering when history is fetched again.
 No schema migration or replayed tool execution is involved.
@@ -165,7 +175,7 @@ No schema migration or replayed tool execution is involved.
 phases. The server generates all four level previews by invoking the real
 callback; raw is generated from the unchanged synthetic envelope. Never put real
 session data or secrets in examples/names. Public catalog records contain only
-IDs, names, event types, optional tool/harness, and generated examples. Harness
+IDs, names, event types, optional tool/harness, alias identities, semantic hints, and generated examples. Harness
 IDs are qualified as `<harness>/<renderer.id>`; server-default IDs are unqualified.
 
 Client transport is opt-in and additive:
@@ -173,7 +183,7 @@ Client transport is opt-in and additive:
 - Non-agent snapshots advertise `capabilities.rendering = {version: 1, catalog: "events.renderers"}`.
 - `events.renderers {}` returns `{version: 1, renderers: [...]}` (client-only).
 - `subscribe {renderings: true}` sends a separate
-  `{kind: "presentation", seq, rendering: {rendererId, subtype?, summary, extended, full, extendedDiff?}}`
+  `{kind: "presentation", seq, rendering: {rendererId, subtype?, canonicalTool?, summary, extended, full, extendedDiff?, updateMode?, extendedLayout?}}`
   **before** its unchanged event frame. Filters apply to both; agent subscriptions
   never receive presentation frames.
 - `events.history {after, limit, agentId?, renderings: true}` adds a `renderings`

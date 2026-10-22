@@ -18,7 +18,7 @@ test("renderer precedence, exact tool identity, any harness event and generic no
   registry.register(renderer("server.default"));
   registry.registerHarness("pi", [renderer("all"), renderer("read", { tool: "read" }), renderer("plan", { eventTypes: ["agent.plan"], examples: [{ type: "agent.plan", data: {} }] })]);
   expect(registry.render(event(), "pi", "server.default")?.rendererId).toBe("pi/read");
-  expect(registry.render(event("tool.call", { title: "grep", kind: "read" }), "pi", "server.default")?.rendererId).toBe("pi/all");
+  expect(registry.render(event("tool.call", { title: "grep", kind: "read" }), "pi", "server.default")?.rendererId).toBe("server.default");
   expect(registry.render(event(), "other", "server.default")?.rendererId).toBe("server.default");
   expect(registry.render(event(), "other", "absent")?.rendererId).toBe("generic");
   expect(registry.render(event("agent.plan"), "pi", "server.default")?.rendererId).toBe("pi/plan");
@@ -28,6 +28,28 @@ test("renderer precedence, exact tool identity, any harness event and generic no
   expect(levels.summary).toEndWith("…");
   expect(levels.extended.split("\n")).toHaveLength(2);
   expect(levels.full).toContain("all content");
+});
+
+test("tool selection uses emitted harness identity, explicit aliases, canonical renderers, then selected default and generic", () => {
+  const registry = new RendererRegistry();
+  registry.registerHarness("pi", [renderer("exact", { tool: "mcp__agentorg__get_operation", render: () => ({ summary: "exact", extended: "exact", full: "exact" }) })], { "mcp__agentorg__get_operation": "get_operation" });
+  const emitted = event("tool.result", { title: "mcp__agentorg__get_operation", rawInput: { operationId: "original" } });
+  const exact = registry.render(emitted, "pi", "core.tools")!;
+  expect(exact.rendererId).toBe("pi/exact"); expect(exact.subtype).toBe("mcp__agentorg__get_operation");
+  registry.registerToolRenderer(renderer("plugin.operation", { tool: "plugin_custom", render: () => ({ summary: "plugin operation", extended: "plugin operation", full: "plugin operation" }) }));
+  const pluginTool = registry.render(event("tool.result", { title: "plugin_custom", rawInput: { key: "x" } }), "other", "core.tools")!;
+  expect(pluginTool.rendererId).toBe("plugin.operation");
+  const canonical = registry.render(event("tool.result", { title: "get_operation", rawInput: { operationId: "x" } }), "other", "core.tools")!;
+  const builtin = registry.render(event("tool.result", { title: "wait_operation", rawInput: { operationId: "x" } }), "other", "core.tools")!;
+  expect(builtin.rendererId).toBe("core.mcp-wait-operation");
+  const replaceSession = registry.render(event("tool.result", { title: "replace_subagent_session", rawInput: { agentId: "worker" } }), "other", "core.tools")!;
+  expect(replaceSession.rendererId).toBe("core.mcp-replace-subagent-session");
+  expect(replaceSession.summary).toBe("Replace session · agent worker");
+  expect(canonical.canonicalTool).toBe("get_operation");
+  const alias = registry.render(event("tool.result", { title: "mcp__agentorg__get_operation", rawInput: { operationId: "x" } }), "other", "core.tools")!;
+  expect(alias.rendererId).toBe("core.tools"); // Aliases are harness-scoped; no suffix guessing.
+  const fallback = registry.render(event("tool.result", { title: "not_registered" }), "other", "missing")!;
+  expect(fallback.rendererId).toBe("generic");
 });
 
 test("throwing, invalid and mutating callbacks are isolated and fall through all tiers", () => {
@@ -76,7 +98,7 @@ for (const tool of ["read", "bash", "edit", "write"]) {
     const registry = new RendererRegistry();
     for (const example of toolExamples(tool)) {
       const e = event(example.type, example.data);
-      const rendered = registry.render(e, undefined, "core.tools")!;
+      const rendered = renderTool(e);
       expect(rendered.summary.split("\n")).toHaveLength(1);
       expect(rendered.extended.split("\n").length).toBeLessThanOrEqual(2);
       expect(rendered.full).not.toContain("rawInput");
@@ -100,6 +122,35 @@ for (const tool of ["read", "bash", "edit", "write"]) {
   });
 }
 
+test("core MCP renderers cover exactly the fourteen public tools and preserve stable identity/details", () => {
+  const registry = new RendererRegistry();
+  const names = ["create_subagent", "prompt_subagent", "get_subagent", "snapshot_organization", "stop_subagent", "restart_subagent", "restart_subagent_subtree", "replace_subagent_session", "remove_subagent", "modify_subagent", "get_completion", "get_operation", "wait_operation", "cancel_operation"];
+  expect(registry.catalog().filter(r => r.id.startsWith("core.mcp-")).map(r => r.tool)).toEqual(names);
+  for (const tool of names) {
+    const input = tool === "get_completion" ? { batchId: "batch-1", after: 0, limit: 5 } : ["get_operation", "wait_operation", "cancel_operation"].includes(tool) ? { operationId: "op-1" } : tool === "create_subagent" ? { name: "worker", settings: { harness: "pi" } } : { agentId: "worker" };
+    const rendered = registry.render(event("tool.result", { title: tool, status: "completed", rawInput: input, rawOutput: { content: [{ type: "text", text: JSON.stringify({ status: "running", id: "outer-operation" }) }], isError: false } }), undefined, "core.tools")!;
+    expect(rendered.rendererId).toContain("core.mcp-"); expect(rendered.subtype).toBe(tool); expect(rendered.summary).not.toContain("✓");
+    expect(rendered.full).toContain(`Tool: ${tool}`); expect(rendered.full).toContain("Received result:");
+    expect(rendered.updateMode).toBe("semantic"); expect(rendered.extendedLayout).toBe("header-detail");
+  }
+  const create = registry.render(event("tool.result", { title: "create_subagent", status: "completed", rawInput: { name: "worker" }, rawOutput: { content: [{ type: "text", text: JSON.stringify({ operationId: "op", agentId: "parent" }) }] } }), undefined, "core.tools")!;
+  expect(create.summary).toContain("worker"); expect(create.full).not.toContain("Child ID:");
+});
+
+test("MCP JSON text envelopes keep invocation errors distinct from returned operation state and expose truncation", () => {
+  const envelope = (value: unknown, isError = false) => ({ content: [{ type: "text", text: JSON.stringify(value) }], isError });
+  const running = new RendererRegistry().render(event("tool.result", { title: "wait_operation", status: "completed", rawInput: { operationId: "op-1" }, rawOutput: envelope({ id: "op-1", status: "running" }) }), undefined, "core.tools")!;
+  expect(running.summary).toContain("Wait for operation"); expect(running.full).toContain("Returned status: running"); expect(running.full).toContain("Tool invocation: completed");
+  const failure = new RendererRegistry().render(event("tool.result", { title: "get_operation", status: "completed", rawInput: { operationId: "op-1" }, rawOutput: envelope({ error: "denied" }, true) }), undefined, "core.tools")!;
+  expect(failure.full).toContain("Invocation failed"); expect(failure.full).toContain("denied"); expect(failure.full).toContain("Tool invocation: completed");
+  const domainFailure = new RendererRegistry().render(event("tool.result", { title: "get_operation", status: "completed", rawInput: { operationId: "op-1" }, rawOutput: envelope({ a: true, s: "failed", t: true, r: null, isError: true }, false) }), undefined, "core.tools")!;
+  expect(domainFailure.full).not.toContain("Invocation failed"); expect(domainFailure.full).toContain("Result truncated: yes"); expect(domainFailure.full).toContain("null");
+  const completion = new RendererRegistry().render(event("tool.result", { title: "get_completion", rawInput: { batchId: "b" }, rawOutput: envelope({ b: "b", s: "ready", t: 10, a: 5, n: 10, i: [{ x: 5, o: "op", g: "child", s: "completed", r: false }] }) }), undefined, "core.tools")!;
+  expect(completion.full).toContain("Members on page: 1 of 10"); expect(completion.full).toContain("Next cursor: 10"); expect(completion.full).not.toContain("TRUNCATED");
+  const truncated = new RendererRegistry().render(event("tool.result", { title: "get_completion", rawInput: { batchId: "b" }, rawOutput: { truncated: true, originalBytes: 99999, preview: "partial" } }), undefined, "core.tools")!;
+  expect(truncated.full).toContain("TRUNCATED"); expect(truncated.full).toContain("partial");
+});
+
 test("missing, unknown, image, partial, truncated and error results never pretend to have succeeded", () => {
   for (const data of [null, {}, { title: "unknown", rawInput: "partial {" }, { title: "read", rawInput: { path: 42 } }, { truncated: true, originalBytes: 1000, preview: "partial {" }]) {
     expect(renderTool(event("tool.result", data)).full).toContain("Output unavailable");
@@ -117,7 +168,9 @@ test("real JSONL opt-in presentation and history sidecars preserve envelopes and
   const dir = mkdtempSync(join(tmpdir(), "rendering-"));
   const server = await OrganizationServer.start({ dataDir: dir, socketPath: join(dir, "server.sock"), plugins: [{ apiVersion: 1, name: "styles", setup(host) {
     host.registerRenderer(renderer("server.custom"));
-    host.registerHarness({ name: "pi", renderers: [renderer("read", { tool: "read" })], launch: () => ({ command: "unused", args: [] }) });
+    host.registerTool({ name: "plugin_custom", description: "fixture", inputSchema: { type: "object" }, execute: () => ({ ok: true }) });
+    host.registerToolRenderer({ ...renderer("plugin.automatic", { tool: "plugin_custom" }), render: () => ({ summary: "plugin-owned tool", extended: "plugin-owned tool\\nready", full: "plugin-owned tool", updateMode: "semantic", extendedLayout: "header-detail" }) });
+    host.registerHarness({ name: "pi", renderers: [renderer("read", { tool: "read" })], toolAliases: names => Object.fromEntries(names.map(name => [`mcp__pi__${name}`, name])), launch: () => ({ command: "unused", args: [] }) });
   } }] });
   const client = await OrganizationClient.connect(join(dir, "server.sock"));
   try {
@@ -137,6 +190,10 @@ test("real JSONL opt-in presentation and history sidecars preserve envelopes and
     expect(choices.choices.map((choice: any) => choice.value)).toEqual(["core.tools", "generic", "server.custom"]);
     const catalog = await client.request<any>("events.renderers");
     expect(catalog.renderers.find((r: any) => r.id === "pi/read").tool).toBe("read");
+    const custom = server.organization.renderEvent(event("tool.result", { title: "plugin_custom", rawInput: { value: 1 } }))!;
+    expect(custom.rendererId).toBe("plugin.automatic"); expect(custom.summary).toBe("plugin-owned tool");
+    const aliased = server.organization.renderEvent(event("tool.result", { title: "mcp__pi__plugin_custom", rawInput: { value: 1 } }))!;
+    expect(aliased.rendererId).toBe("plugin.automatic"); expect(aliased.subtype).toBe("mcp__pi__plugin_custom"); expect(aliased.canonicalTool).toBe("plugin_custom");
     server.organization.agents.get("agent")!.settings.harness = "other";
     await client.request("organization.settings.update", { namespace: "rendering", expectedRevision: 0, patch: { defaultToolRenderer: "server.custom" } });
     const rerendered = await client.request<any>("events.history", { after: received.seq - 1, limit: 1, renderings: true });

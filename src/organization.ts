@@ -257,10 +257,12 @@ export class Organization implements PluginHost {
   registerHarness(harness: HarnessPlugin) {
     if (this.harnesses.has(harness.name))
       throw new Error(`Duplicate harness ${harness.name}`);
-    this.renderers.registerHarness(harness.name, harness.renderers ?? []);
+    this.renderers.registerHarness(harness.name, harness.renderers ?? [], harness.toolAliases ?? {});
     this.harnesses.set(harness.name, harness);
   }
   registerRenderer(renderer: EventRenderer) { this.renderers.register(renderer); }
+  registerToolRenderer(renderer: EventRenderer) { this.renderers.registerToolRenderer(renderer); }
+  validateRendererRegistrations() { this.renderers.validateRegistrations(this.tools.keys()); }
   renderEvent(event: ServerEvent) {
     const harness = event.agentId ? this.agents.get(event.agentId)?.settings.harness : undefined;
     let presentation = event;

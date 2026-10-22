@@ -77,7 +77,7 @@ test("malformed, huge and incomplete edit data is bounded and retains a raw fall
   const many = renderTool(event({ edits: Array.from({ length: 65 }, () => ({ oldText: "old", newText: "new" })) }));
   expect(many.extended).toContain("TRUNCATED"); expect(many.full).toContain("Additional regions omitted");
   const registry = new RendererRegistry();
-  const escaped = registry.render(event({ path: "a.ts", edits: [{ oldText: "```\nold", newText: "```\nnew" }] }), undefined, "core.tools")!;
+  const escaped = renderTool(event({ path: "a.ts", edits: [{ oldText: "```\nold", newText: "```\nnew" }] }));
   expect(escaped.extendedDiff).toMatchObject({ before: "old", after: "new" });
   expect(escaped.summary.split("\n")).toHaveLength(1);
   expect(escaped.extended.split("\n")).toHaveLength(2);
