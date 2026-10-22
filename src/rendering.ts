@@ -23,8 +23,8 @@ export interface EventRenderer {
 }
 export interface EventRendering extends RenderLevels { rendererId: string; subtype?: string; canonicalTool?: string }
 export interface RendererMetadata {
-  id: string; name: string; eventTypes: string[]; tool?: string; harness?: string; aliases?: string[]; updateMode?: "semantic" | "streaming"; extendedLayout?: "header-detail";
-  examples: Array<RenderLevels & { type: string; raw: string }>;
+  id: string; name: string; eventTypes: string[]; tool?: string; harness?: string; aliases?: string[]; aliasExamples?: Record<string, Array<RenderLevels & { type: string; raw: string; subtype?: string }>>; updateMode?: "semantic" | "streaming"; extendedLayout?: "header-detail";
+  examples: Array<RenderLevels & { type: string; raw: string; subtype?: string }>;
 }
 const renderingSettingsSchema = z.object({ defaultToolRenderer: z.string().min(1).max(128) }).strict();
 const levelsSchema = z.object({ summary: z.string(), extended: z.string(), full: z.string(), extendedDiff: z.object({
@@ -278,18 +278,25 @@ export class RendererRegistry {
   }
   catalog(): RendererMetadata[] {
     if (this.metadata) return structuredClone(this.metadata);
-    const metadata = (renderer: EventRenderer, harness?: string): RendererMetadata => ({
+    const examples = (renderer: EventRenderer, identity?: string) => renderer.examples.flatMap(example => {
+      const data = structuredClone(example.data) as Record<string, unknown>;
+      if (identity && data && typeof data === "object") {
+        if (typeof data.toolName === "string") data.toolName = identity;
+        else if (typeof data.title === "string") data.title = identity;
+      }
+      const event: ServerEvent = { kind: "event", seq: 0, time: "2026-01-01T00:00:00.000Z", type: example.type, data };
+      try { return [{ type: event.type, ...invoke(renderer, event), raw: pretty(event), ...(identity && { subtype: identity }) }]; }
+      catch { return []; }
+    });
+    const metadata = (renderer: EventRenderer, harness?: string, aliases: string[] = []): RendererMetadata => ({
       id: `${harness ? `${harness}/` : ""}${renderer.id}`, name: renderer.name, eventTypes: [...renderer.eventTypes],
       ...(renderer.tool && { tool: renderer.tool }), ...(renderer.updateMode && { updateMode: renderer.updateMode }), ...(renderer.extendedLayout && { extendedLayout: renderer.extendedLayout }), ...(harness && { harness }),
-      examples: renderer.examples.flatMap(example => {
-        const event: ServerEvent = { kind: "event", seq: 0, time: "2026-01-01T00:00:00.000Z", type: example.type, data: structuredClone(example.data) };
-        try { return [{ type: event.type, ...invoke(renderer, event), raw: pretty(event) }]; }
-        catch { return []; }
-      }),
+      ...(aliases.length && { aliases, aliasExamples: Object.fromEntries(aliases.map(identity => [identity, examples(renderer, identity)])) }),
+      examples: examples(renderer),
     });
-    this.metadata = [...this.defaults.values()].map(r => metadata(r)).concat([...this.automatic.values()].flat().flatMap(r => {
+    this.metadata = [...this.defaults.values()].map(r => metadata(r)).concat([...this.automatic.values()].flat().map(r => {
       const aliases = [...this.aliases.keys()].flatMap(harness => Object.entries(this.aliasesFor(harness)).filter(([, canonical]) => canonical === r.tool).map(([emitted]) => emitted));
-      return [{ ...metadata(r), ...(aliases.length && { aliases }) }];
+      return metadata(r, undefined, aliases);
     }), [...this.harnesses].flatMap(([harness, renderers]) => renderers.map(r => metadata(r, harness))));
     return structuredClone(this.metadata);
   }

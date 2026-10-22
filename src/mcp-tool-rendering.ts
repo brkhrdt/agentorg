@@ -94,12 +94,29 @@ export function renderMcpTool(tool: McpToolName, event: Readonly<ServerEvent>): 
   const full = [`Tool: ${toolIdentity(event) ?? tool}`, title, ...details, `Input:\n${fenced(pretty(input), "json")}`, `Received result:\n${fenced(pretty(data.rawOutput ?? data.content), "json")}`, `Decoded MCP value:\n${fenced(pretty(decoded.domain), "json")}`].join("\n\n");
   return { summary: title, extended: `${title}\n${detail}`, full, updateMode: "semantic", extendedLayout: "header-detail" };
 }
+const exampleInputs: Record<McpToolName, unknown> = {
+  create_subagent:{name:"reviewer",settings:{harness:"pi",model:"provider/model"}}, prompt_subagent:{agentId:"child-1",text:"Review the implementation",queue:true}, get_subagent:{agentId:"child-1"}, snapshot_organization:{includeTerminalOperations:false}, stop_subagent:{agentId:"child-1"}, restart_subagent:{agentId:"child-1"}, restart_subagent_subtree:{agentId:"child-1"}, replace_subagent_session:{agentId:"child-1"}, remove_subagent:{agentId:"child-1"}, modify_subagent:{agentId:"child-1",expectedRevision:3,settings:{model:"provider/model"}}, get_completion:{batchId:"operation-1",after:0,limit:20}, get_operation:{operationId:"operation-1",resultOnly:true}, wait_operation:{operationId:"operation-1",waitMs:1000}, cancel_operation:{operationId:"operation-1"},
+};
+const exampleDomains: Record<McpToolName, { update: unknown; result: unknown }> = {
+  create_subagent:{update:{operationId:"operation-1",status:"running",agentId:"parent-1"},result:{operationId:"operation-1",status:"completed",agentId:"parent-1",result:{id:"child-1",name:"reviewer"}}},
+  prompt_subagent:{update:{operationId:"operation-2",status:"running",agentId:"child-1"},result:{operationId:"operation-2",status:"queued",agentId:"child-1"}},
+  get_subagent:{update:{id:"child-1",name:"reviewer",state:"starting",revision:3,sessionNumber:1},result:{id:"child-1",name:"reviewer",state:"running",revision:3,sessionNumber:1}},
+  snapshot_organization:{update:{seq:41,agents:[{id:"parent-1"},{id:"child-1"}],operations:[{id:"operation-1",status:"running"}]},result:{seq:42,agents:[{id:"parent-1"},{id:"child-1"}],operations:[{id:"operation-1",status:"completed"}]}},
+  stop_subagent:{update:{id:"operation-3",status:"running",agentId:"child-1"},result:{id:"operation-3",status:"completed",agentId:"child-1",result:{state:"stopped"}}},
+  restart_subagent:{update:{id:"operation-4",status:"running",agentId:"child-1"},result:{id:"operation-4",status:"completed",agentId:"child-1",result:{state:"running",generation:"generation-2"}}},
+  restart_subagent_subtree:{update:{id:"operation-5",status:"running",agentId:"child-1"},result:{id:"operation-5",status:"completed",agentId:"child-1"}},
+  replace_subagent_session:{update:{id:"operation-6",status:"running",agentId:"child-1"},result:{id:"operation-6",status:"completed",agentId:"child-1",result:{sessionId:"session-2",sessionNumber:2}}},
+  remove_subagent:{update:{id:"operation-7",status:"running",agentId:"child-1"},result:{id:"operation-7",status:"completed",agentId:"child-1",result:{removedAt:"2026-01-01T00:00:00.000Z"}}},
+  modify_subagent:{update:{id:"operation-8",status:"running",agentId:"child-1"},result:{id:"operation-8",status:"completed",agentId:"child-1",result:{revision:4}}},
+  get_completion:{update:{b:"operation-9",s:"dispatching",t:2,a:0,n:1,i:[{x:0,o:"operation-8",g:"child-1",s:"running",r:false}]},result:{b:"operation-9",s:"ready",t:2,a:0,n:1,i:[{x:0,o:"operation-8",g:"child-1",s:"completed",r:true}]}},
+  get_operation:{update:{a:true,s:"running",t:false,r:null},result:{a:true,s:"completed",t:false,r:{status:"completed"}}},
+  wait_operation:{update:{id:"operation-8",type:"agent.modify",status:"running",cancelRequested:false},result:{id:"operation-8",type:"agent.modify",status:"completed",cancelRequested:false,result:{revision:4}}},
+  cancel_operation:{update:{id:"operation-8",type:"agent.prompt",status:"running",cancelRequested:true},result:{id:"operation-8",type:"agent.prompt",status:"stopped",cancelRequested:true}},
+};
 function exampleData(tool: McpToolName, type: string): unknown {
-  const inputs: Record<McpToolName, unknown> = {
-    create_subagent:{ name:"reviewer", settings:{ harness:"pi", model:"provider/model" } }, prompt_subagent:{ agentId:"child-1", text:"Inspect the implementation", queue:true }, get_subagent:{agentId:"child-1"}, snapshot_organization:{includeTerminalOperations:false}, stop_subagent:{agentId:"child-1"}, restart_subagent:{agentId:"child-1"}, restart_subagent_subtree:{agentId:"child-1"}, replace_subagent_session:{agentId:"child-1"}, remove_subagent:{agentId:"child-1"}, modify_subagent:{agentId:"child-1",expectedRevision:3,settings:{model:"provider/model"}}, get_completion:{batchId:"operation-1",after:0,limit:20}, get_operation:{operationId:"operation-1",resultOnly:true}, wait_operation:{operationId:"operation-1",waitMs:1000}, cancel_operation:{operationId:"operation-1"},
-  };
-  const domain: Record<string, unknown> = tool === "create_subagent" ? { operationId:"operation-1",status:"running",agentId:"parent-1" } : tool === "get_operation" ? {a:true,s:"running",t:false,r:{progress:"working"}} : tool === "get_completion" ? {b:"operation-1",s:"ready",t:2,a:1,n:1,i:[{x:"prompt-1",o:"operation-2",s:"completed",r:true}]} : {status: type === "tool.call" ? "queued" : "running", count:2};
-  return { title: tool, status: type === "tool.call" ? "pending" : type === "tool.update" ? "in_progress" : "completed", rawInput: inputs[tool], ...(type !== "tool.call" && { rawOutput:{content:[{type:"text",text:JSON.stringify(domain)}],isError:false} }) };
+  const invocationStatus = type === "tool.call" ? "pending" : type === "tool.update" ? "in_progress" : "completed";
+  const domain = type === "tool.call" ? undefined : exampleDomains[tool][type === "tool.update" ? "update" : "result"];
+  return { title: tool, status: invocationStatus, rawInput: structuredClone(exampleInputs[tool]), ...(domain !== undefined && { rawOutput:{content:[{type:"text",text:JSON.stringify(domain)}],isError:false} }) };
 }
 export function coreMcpRenderers(): EventRenderer[] {
   return MCP_TOOL_NAMES.map(tool => ({ id:`core.mcp-${tool.replace(/_/g,"-")}`, name:`${tool} · AgentOrg MCP`, tool, eventTypes:["tool.call","tool.update","tool.result"], updateMode:"semantic", examples:["tool.call","tool.update","tool.result"].map(type=>({type,data:exampleData(tool,type)})), render:event=>renderMcpTool(tool,event) }));

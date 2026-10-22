@@ -125,7 +125,22 @@ for (const tool of ["read", "bash", "edit", "write"]) {
 test("core MCP renderers cover exactly the fourteen public tools and preserve stable identity/details", () => {
   const registry = new RendererRegistry();
   const names = ["create_subagent", "prompt_subagent", "get_subagent", "snapshot_organization", "stop_subagent", "restart_subagent", "restart_subagent_subtree", "replace_subagent_session", "remove_subagent", "modify_subagent", "get_completion", "get_operation", "wait_operation", "cancel_operation"];
-  expect(registry.catalog().filter(r => r.id.startsWith("core.mcp-")).map(r => r.tool)).toEqual(names);
+  registry.registerHarness("pi", [], canonicalTools => Object.fromEntries(canonicalTools.map(tool => [`mcp__agentorg__${tool}`, tool])));
+  registry.validateRegistrations(names);
+  const coreCatalog = registry.catalog().filter(r => r.id.startsWith("core.mcp-"));
+  expect(coreCatalog.map(r => r.tool)).toEqual(names);
+  for (const entry of coreCatalog) {
+    expect(entry.examples.map(example => example.type)).toEqual(["tool.call", "tool.update", "tool.result"]);
+    for (const example of entry.examples) expect(JSON.parse(example.raw).data.title).toBe(entry.tool);
+  }
+  const aliasedCatalog = registry.catalog().filter(r => r.id.startsWith("core.mcp-"));
+  for (const entry of aliasedCatalog) {
+    const emitted = `mcp__agentorg__${entry.tool}`;
+    expect(entry.aliases).toContain(emitted);
+    const aliasExamples = entry.aliasExamples?.[emitted];
+    expect(aliasExamples?.map(example => example.type)).toEqual(["tool.call", "tool.update", "tool.result"]);
+    for (const example of aliasExamples ?? []) { expect(example.subtype).toBe(emitted); expect(JSON.parse(example.raw).data.title).toBe(emitted); }
+  }
   for (const tool of names) {
     const input = tool === "get_completion" ? { batchId: "batch-1", after: 0, limit: 5 } : ["get_operation", "wait_operation", "cancel_operation"].includes(tool) ? { operationId: "op-1" } : tool === "create_subagent" ? { name: "worker", settings: { harness: "pi" } } : { agentId: "worker" };
     const rendered = registry.render(event("tool.result", { title: tool, status: "completed", rawInput: input, rawOutput: { content: [{ type: "text", text: JSON.stringify({ status: "running", id: "outer-operation" }) }], isError: false } }), undefined, "core.tools")!;

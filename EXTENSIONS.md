@@ -175,8 +175,7 @@ No schema migration or replayed tool execution is involved.
 phases. The server generates all four level previews by invoking the real
 callback; raw is generated from the unchanged synthetic envelope. Never put real
 session data or secrets in examples/names. Public catalog records contain only
-IDs, names, event types, optional tool/harness, alias identities, semantic hints, and generated examples. Harness
-IDs are qualified as `<harness>/<renderer.id>`; server-default IDs are unqualified.
+IDs, names, event types, optional tool/harness, alias identities, semantic hints, and generated examples. Tool renderers with explicit aliases may include `aliasExamples`, keyed by each emitted alias; these are the same synthetic call/update/result fixtures rendered with that emitted identity in their raw event. Harness IDs are qualified as `<harness>/<renderer.id>`; server-default IDs are unqualified.
 
 Client transport is opt-in and additive:
 
