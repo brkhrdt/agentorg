@@ -130,7 +130,7 @@ test("core MCP renderers cover exactly the fourteen public tools and preserve st
     expect(rendered.updateMode).toBe("semantic"); expect(rendered.extendedLayout).toBe("header-detail"); expect(rendered.toolSymbol).toBe("∴");
   }
   const prompt = registry.render(event("tool.call", { title: "prompt_subagent", status: "pending", rawInput: { agentId: "child-7", text: "Review this change", queue: true } }), undefined, "core.tools")!;
-  expect(prompt.summary).toBe("@child-7 Review this change"); expect(prompt.toolSymbol).toBe("∴"); expect(prompt.toolTarget).toBe("@child-7");
+  expect(prompt.summary).toBe("@child-7 Review this change"); expect(prompt.toolSymbol).toBe("∴"); expect(prompt.toolTarget).toBe("@child-7"); expect(prompt.toolPrompt).toBe("Review this change");
   const create = registry.render(event("tool.result", { title: "create_subagent", status: "completed", rawInput: { name: "worker" }, rawOutput: { content: [{ type: "text", text: JSON.stringify({ operationId: "op", agentId: "parent" }) }] } }), undefined, "core.tools")!;
   expect(create.summary).toContain("worker"); expect(create.full).not.toContain("Child ID:");
 });

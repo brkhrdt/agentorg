@@ -7,7 +7,7 @@ export interface ExtendedDiff { prefix: string; before: string; after: string }
 export interface RenderLevels {
   summary: string; extended: string; full: string; extendedDiff?: ExtendedDiff;
   updateMode?: "semantic" | "streaming"; extendedLayout?: "header-detail";
-  toolSymbol?: string; toolTarget?: string; invocationError?: boolean;
+  toolSymbol?: string; toolTarget?: string; toolPrompt?: string; invocationError?: boolean;
 }
 /** Presentation-only facts. Received event fields are never rewritten. */
 export interface RenderContext { targetName?: string }
@@ -35,7 +35,7 @@ const hints = {
 const levelsSchema = z.object({
   summary: z.string(), extended: z.string(), full: z.string(), ...hints,
   toolSymbol: z.string().min(1).max(8).regex(/^[^\s\p{C}]+$/u).optional(),
-  toolTarget: z.string().min(1).max(256).optional(), invocationError: z.boolean().optional(),
+  toolTarget: z.string().min(1).max(256).optional(), toolPrompt: z.string().max(2 * 1024 * 1024).optional(), invocationError: z.boolean().optional(),
   extendedDiff: z.object({ prefix: z.string().max(8192), before: z.string().max(8192), after: z.string().max(8192) }).optional(),
 });
 const descriptorSchema = z.object({
