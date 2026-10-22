@@ -77,11 +77,11 @@ function domainDetails(tool: McpToolName, value: unknown): string[] {
 function subject(tool: McpToolName, input: Record<string, any>): string {
   const args = tool === "snapshot_organization" ? (input.includeTerminalOperations === false ? "active operations" : "all operations")
     : tool === "create_subagent" ? [input.name, record(input.settings).harness, record(input.settings).model].filter(Boolean).join(" · ") || "child request"
-    : tool === "prompt_subagent" ? `${idFor(input,"agentId","[agent unavailable]")}${input.queue === true ? " · queue" : " · supersede"}`
+    : tool === "prompt_subagent" ? `@${idFor(input,"agentId","[agent unavailable]")} ${typeof input.text === "string" && input.text.trim() ? oneLine(input.text) : "[prompt unavailable]"}`
     : tool === "get_completion" ? `batch ${idFor(input,"batchId","[batch unavailable]")}`
     : ["get_operation","wait_operation","cancel_operation"].includes(tool) ? `operation ${idFor(input,"operationId","[operation unavailable]")}`
     : `agent ${idFor(input,"agentId","[agent unavailable]")}`;
-  return `${labels[tool]} · ${args}`;
+  return tool === "prompt_subagent" ? args : `${labels[tool]} · ${args}`;
 }
 export function renderMcpTool(tool: McpToolName, event: Readonly<ServerEvent>): RenderLevels {
   const data = record(event.data), input = data.rawInput, decoded = decodeMcpOutput(event), args = record(input), details = domainDetails(tool, decoded.domain);
@@ -91,8 +91,9 @@ export function renderMcpTool(tool: McpToolName, event: Readonly<ServerEvent>): 
   if (data.status) details.push(`Tool invocation: ${String(data.status).replace(/_/g, " ")}`);
   const title = subject(tool, args);
   const detail = details.slice(0, 4).join(" · ") || "No additional status available";
-  const full = [`Tool: ${toolIdentity(event) ?? tool}`, title, ...details, `Input:\n${fenced(pretty(input), "json")}`, `Received result:\n${fenced(pretty(data.rawOutput ?? data.content), "json")}`, `Decoded MCP value:\n${fenced(pretty(decoded.domain), "json")}`].join("\n\n");
-  return { summary: title, extended: `${title}\n${detail}`, full, updateMode: "semantic", extendedLayout: "header-detail" };
+  const identity = toolIdentity(event) ?? tool;
+  const full = [tool === "prompt_subagent" ? title : `Tool: ${identity}`, ...(tool === "prompt_subagent" ? [`Tool: ${identity}`, title] : [title]), ...details, `Input:\n${fenced(pretty(input), "json")}`, `Received result:\n${fenced(pretty(data.rawOutput ?? data.content), "json")}`, `Decoded MCP value:\n${fenced(pretty(decoded.domain), "json")}`].join("\n\n");
+  return { summary: title, extended: `${title}\n${detail}`, full, updateMode: "semantic", extendedLayout: "header-detail", toolSymbol: "∴", ...(tool === "prompt_subagent" && { toolTarget: `@${idFor(args,"agentId","[agent unavailable]")}` }) };
 }
 const exampleInputs: Record<McpToolName, unknown> = {
   create_subagent:{name:"reviewer",settings:{harness:"pi",model:"provider/model"}}, prompt_subagent:{agentId:"child-1",text:"Review the implementation",queue:true}, get_subagent:{agentId:"child-1"}, snapshot_organization:{includeTerminalOperations:false}, stop_subagent:{agentId:"child-1"}, restart_subagent:{agentId:"child-1"}, restart_subagent_subtree:{agentId:"child-1"}, replace_subagent_session:{agentId:"child-1"}, remove_subagent:{agentId:"child-1"}, modify_subagent:{agentId:"child-1",expectedRevision:3,settings:{model:"provider/model"}}, get_completion:{batchId:"operation-1",after:0,limit:20}, get_operation:{operationId:"operation-1",resultOnly:true}, wait_operation:{operationId:"operation-1",waitMs:1000}, cancel_operation:{operationId:"operation-1"},

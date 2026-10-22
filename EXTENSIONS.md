@@ -182,7 +182,7 @@ Client transport is opt-in and additive:
 - Non-agent snapshots advertise `capabilities.rendering = {version: 1, catalog: "events.renderers"}`.
 - `events.renderers {}` returns `{version: 1, renderers: [...]}` (client-only).
 - `subscribe {renderings: true}` sends a separate
-  `{kind: "presentation", seq, rendering: {rendererId, subtype?, canonicalTool?, summary, extended, full, extendedDiff?, updateMode?, extendedLayout?}}`
+  `{kind: "presentation", seq, rendering: {rendererId, subtype?, canonicalTool?, summary, extended, full, extendedDiff?, updateMode?, extendedLayout?, toolSymbol?, toolTarget?}}`
   **before** its unchanged event frame. Filters apply to both; agent subscriptions
   never receive presentation frames.
 - `events.history {after, limit, agentId?, renderings: true}` adds a `renderings`

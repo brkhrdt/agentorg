@@ -6,7 +6,7 @@ import { coreMcpRenderers, MCP_TOOL_NAMES } from "./mcp-tool-rendering.ts";
 
 /** Optional semantic spans for an edit's two-line preview; clients choose all colors. */
 export interface ExtendedDiff { prefix: string; before: string; after: string }
-export interface RenderLevels { summary: string; extended: string; full: string; extendedDiff?: ExtendedDiff; updateMode?: "semantic" | "streaming"; extendedLayout?: "header-detail" }
+export interface RenderLevels { summary: string; extended: string; full: string; extendedDiff?: ExtendedDiff; updateMode?: "semantic" | "streaming"; extendedLayout?: "header-detail"; toolSymbol?: string; toolTarget?: string }
 /** Pure, synchronous, server-side Markdown formatter. Never return ANSI/terminal commands. */
 export interface EventRenderer {
   id: string;
@@ -29,7 +29,7 @@ export interface RendererMetadata {
 const renderingSettingsSchema = z.object({ defaultToolRenderer: z.string().min(1).max(128) }).strict();
 const levelsSchema = z.object({ summary: z.string(), extended: z.string(), full: z.string(), extendedDiff: z.object({
   prefix: z.string().max(8192), before: z.string().max(8192), after: z.string().max(8192),
-}).optional(), updateMode: z.enum(["semantic", "streaming"]).optional(), extendedLayout: z.literal("header-detail").optional() });
+}).optional(), updateMode: z.enum(["semantic", "streaming"]).optional(), extendedLayout: z.literal("header-detail").optional(), toolSymbol: z.string().min(1).max(8).optional(), toolTarget: z.string().min(1).max(256).optional() });
 const descriptorSchema = z.object({
   id: z.string().regex(/^[a-z][a-z0-9.-]*$/).max(128), name: z.string().min(1).max(128),
   eventTypes: z.array(z.string().min(1).max(128)).min(1).max(64), tool: z.string().min(1).max(128).optional(), updateMode: z.enum(["semantic", "streaming"]).optional(), extendedLayout: z.literal("header-detail").optional(),
@@ -70,7 +70,7 @@ function normalized(value: unknown): RenderLevels {
   // Bound expansion by a trusted callback too; raw events are never shortened here.
   const bound = (text: string, max = 2 * 1024 * 1024) => Buffer.byteLength(text) <= max ? text : Buffer.from(text).subarray(0, max).toString("utf8") + " [RENDERING TRUNCATED; see raw event]";
   return { summary: lineCap(bound(levels.summary, 8192), 1) || "—", extended: lineCap(bound(levels.extended, 16384), 2), full: bound(levels.full),
-    ...(levels.extendedDiff && { extendedDiff: { prefix: oneLine(levels.extendedDiff.prefix), before: oneLine(levels.extendedDiff.before), after: oneLine(levels.extendedDiff.after) } }), ...(levels.updateMode && { updateMode: levels.updateMode }), ...(levels.extendedLayout && { extendedLayout: levels.extendedLayout }),
+    ...(levels.extendedDiff && { extendedDiff: { prefix: oneLine(levels.extendedDiff.prefix), before: oneLine(levels.extendedDiff.before), after: oneLine(levels.extendedDiff.after) } }), ...(levels.updateMode && { updateMode: levels.updateMode }), ...(levels.extendedLayout && { extendedLayout: levels.extendedLayout }), ...(levels.toolSymbol && { toolSymbol: levels.toolSymbol }), ...(levels.toolTarget && { toolTarget: levels.toolTarget }),
   };
 }
 function invoke(renderer: EventRenderer, event: ServerEvent): RenderLevels {
