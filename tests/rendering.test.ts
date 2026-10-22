@@ -192,6 +192,9 @@ test("real JSONL opt-in presentation and history sidecars preserve envelopes and
   const client = await OrganizationClient.connect(join(dir, "server.sock"));
   try {
     server.organization.agents.set("agent", { id: "agent", settings: { harness: "pi", options: {} } } as AgentRecord);
+    server.organization.agents.set("child-id", { id: "child-id", sessionId: "session-id", name: "Reviewer", settings: { harness: "pi", options: {} } } as AgentRecord);
+    const prompt = server.organization.renderEvent(event("tool.call", { title: "mcp__pi__prompt_subagent", status: "pending", rawInput: { agentId: "session-id", text: "Review the implementation" } }))!;
+    expect(prompt.summary).toBe("@Reviewer Review the implementation"); expect(prompt.toolTarget).toBe("@Reviewer");
     const frames: ServerEvent[] = [], presentations = new Map<number, any>();
     client.onEvent(e => frames.push(e)); client.onPresentation((seq, value) => presentations.set(seq, value));
     await client.request("subscribe", { renderings: true });
