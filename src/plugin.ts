@@ -5,8 +5,8 @@ import type { ServerSettingsDefinition } from "./server-settings.ts";
 export type { ServerSettingsDefinition, ServerSettingsDescriptor, ServerSettingsField, ServerSettingsView, SettingsEffect } from "./server-settings.ts";
 
 import type { EventRenderer } from "./rendering.ts";
-export type { EventRenderer, RenderLevels, ExtendedDiff, EventRendering, RendererMetadata } from "./rendering.ts";
-export { renderTool, toolExamples, fenced } from "./rendering.ts";
+export type { EventRenderer, RenderContext, RenderLevels, ExtendedDiff, EventRendering, RendererMetadata, RendererExample } from "./rendering.ts";
+export { renderTool, renderGenericTool, toolExamples, fenced } from "./rendering.ts";
 export { editDiff } from "./tool-diff.ts";
 export { MCP_TOOL_NAMES, renderMcpTool, coreMcpRenderers, decodeMcpOutput } from "./mcp-tool-rendering.ts";
 

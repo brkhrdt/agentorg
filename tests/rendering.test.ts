@@ -72,8 +72,8 @@ test("accidental async renderers are rejected safely and source text stays liter
   expect(registry.catalog().find(r => r.id === "async/bad")!.examples).toEqual([]);
   await Bun.sleep(0); // A rejected async callback must not become an unhandled rejection.
   const output = renderTool(event("tool.call", { title: "read", rawInput: { path: "a*[file]`name`.ts" } }));
-  expect(output.summary).toContain("a\\*\\[file\\]");
-  expect(output.full).toContain('a\\*\\[file\\]\\`name\\`.ts');
+  expect(output.summary).toBe("• read");
+  expect(output.full).toContain('"path": "a*[file]`name`.ts"');
 });
 
 test("generated catalog is public JSON only, detached, with four levels and untouched synthetic raw", () => {
@@ -93,34 +93,15 @@ test("generated catalog is public JSON only, detached, with four levels and unto
   expect(registry.catalog().find(r => r.id === "pi/read")!.examples[0]!.full).not.toBe("modified by client");
 });
 
-for (const tool of ["read", "bash", "edit", "write"]) {
-  test(`Pi-style ${tool} calls, partial updates and results obey the contract`, () => {
-    const registry = new RendererRegistry();
+test("core native-tool compatibility helpers are generic; harness plugins own styles", () => {
+  for (const tool of ["read", "bash", "edit", "write"]) {
     for (const example of toolExamples(tool)) {
-      const e = event(example.type, example.data);
-      const rendered = renderTool(e);
-      expect(rendered.summary.split("\n")).toHaveLength(1);
-      expect(rendered.extended.split("\n").length).toBeLessThanOrEqual(2);
-      expect(rendered.full).not.toContain("rawInput");
-      const symbols: Record<string, string> = { read: "\\<", bash: "$", edit: "Δ", write: "\\>" };
-      expect(rendered.summary).toStartWith(symbols[tool]! + " ");
-      expect(rendered.summary).not.toMatch(/ · (pending|in_progress|completed|call|partial|result)\b/);
-      if (tool !== "bash") expect(rendered.summary).toContain(tool === "write" ? "hello.txt" : "src/main.ts");
-      if (tool === "bash") expect(rendered.summary).toContain("$ printf");
-      if (tool === "edit") {
-        expect(rendered.extendedDiff).toMatchObject({ prefix: "Δ src/main.ts", before: "const n = 1;", after: "const n = 2;" });
-        expect(rendered.extended.split("\n")).toHaveLength(2);
-        expect(rendered.full).toContain("```diff");
-        expect(rendered.full).not.toContain('"oldText"');
-      }
-      if (example.type === "tool.result") {
-        if (tool === "edit") { expect(rendered.summary).toContain("+1 / -1"); expect(rendered.full).toContain("```diff"); }
-        if (tool === "read") { expect(rendered.extended).toContain("2 lines"); expect(rendered.summary).toContain("offset=10, limit=2"); }
-        if (tool === "write") expect(rendered.extended).toContain("11 bytes");
-      }
+      const rendered = renderTool(event(example.type, example.data));
+      expect(rendered.summary).toBe(`• ${tool}`);
+      expect(rendered.extendedDiff).toBeUndefined();
     }
-  });
-}
+  }
+});
 
 test("core MCP renderers cover exactly the fourteen public tools and preserve stable identity/details", () => {
   const registry = new RendererRegistry();
@@ -145,7 +126,7 @@ test("core MCP renderers cover exactly the fourteen public tools and preserve st
     const input = tool === "get_completion" ? { batchId: "batch-1", after: 0, limit: 5 } : ["get_operation", "wait_operation", "cancel_operation"].includes(tool) ? { operationId: "op-1" } : tool === "create_subagent" ? { name: "worker", settings: { harness: "pi" } } : { agentId: "worker" };
     const rendered = registry.render(event("tool.result", { title: tool, status: "completed", rawInput: input, rawOutput: { content: [{ type: "text", text: JSON.stringify({ status: "running", id: "outer-operation" }) }], isError: false } }), undefined, "core.tools")!;
     expect(rendered.rendererId).toContain("core.mcp-"); expect(rendered.subtype).toBe(tool); expect(rendered.summary).not.toContain("✓");
-    expect(rendered.full).toContain(`Tool: ${tool}`); expect(rendered.full).toContain("Received result:");
+    expect(rendered.full).toContain(`Tool: ${tool.replace(/_/g, "\\_")}`); expect(rendered.full).toContain("Received result:");
     expect(rendered.updateMode).toBe("semantic"); expect(rendered.extendedLayout).toBe("header-detail"); expect(rendered.toolSymbol).toBe("∴");
   }
   const prompt = registry.render(event("tool.call", { title: "prompt_subagent", status: "pending", rawInput: { agentId: "child-7", text: "Review this change", queue: true } }), undefined, "core.tools")!;
@@ -173,12 +154,12 @@ test("missing, unknown, image, partial, truncated and error results never preten
     expect(renderTool(event("tool.result", data)).full).toContain("Output unavailable");
   }
   const failure = renderTool(event("tool.result", { title: "bash", status: "failed", rawOutput: { content: [{ type: "text", text: "Error: command failed\nexit code: 2" }], details: { truncation: { truncated: true } } } }));
-  expect(failure.summary).toBe("$ \\[command unavailable\\]");
+  expect(failure.summary).toBe("• bash");
   expect(failure.extended).toContain("Error: command failed");
-  expect(failure.extended).toContain("exit 2"); expect(failure.extended).toContain("TRUNCATED");
-  expect(renderTool(event("tool.result", { title: "read", rawOutput: { content: [{ type: "image", data: "binary" }] } })).full).toContain("Image content");
+  expect(failure.full).toContain('"truncated": true');
+  expect(renderTool(event("tool.result", { title: "read", rawOutput: { content: [{ type: "image", data: "binary" }] } })).full).toContain('"type": "image"');
   expect(renderTool(event("tool.call", { title: "bash", rawInput: { command: "echo hi\necho bye" } })).summary.split("\n")).toHaveLength(1);
-  expect(renderTool(event("tool.result", { title: "bash", rawOutput: { structuredContent: { exit_code: 7, output: "out", truncated: true } } })).extended).toContain("exit 7");
+  expect(renderTool(event("tool.result", { title: "bash", rawOutput: { structuredContent: { exit_code: 7, output: "out", truncated: true } } })).full).toContain('"exit_code": 7');
 });
 
 test("real JSONL opt-in presentation and history sidecars preserve envelopes and use current harness/config", async () => {
