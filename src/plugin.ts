@@ -5,8 +5,10 @@ import type { ServerSettingsDefinition } from "./server-settings.ts";
 export type { ServerSettingsDefinition, ServerSettingsDescriptor, ServerSettingsField, ServerSettingsView, SettingsEffect } from "./server-settings.ts";
 
 import type { EventRenderer } from "./rendering.ts";
-export type { EventRenderer, RenderLevels, ExtendedDiff, EventRendering, RendererMetadata } from "./rendering.ts";
-export { renderTool, toolExamples, fenced } from "./rendering.ts";
+export type { EventRenderer, RenderContext, RenderLevels, ExtendedDiff, EventRendering, RendererMetadata, RendererExample } from "./rendering.ts";
+export { renderTool, renderGenericTool, toolExamples, fenced } from "./rendering.ts";
+export { editDiff } from "./tool-diff.ts";
+export { MCP_TOOL_NAMES, renderMcpTool, coreMcpRenderers, decodeMcpOutput } from "./mcp-tool-rendering.ts";
 
 export const PLUGIN_API_VERSION = 1 as const;
 export interface LaunchSpec {
@@ -47,6 +49,8 @@ export interface HarnessPlugin {
   name: string;
   /** Optional presentation contract v1; tool-specific matches precede type-wide matches. */
   renderers?: EventRenderer[];
+  /** Explicit emitted tool identity to canonical identity map; no suffix guessing. */
+  toolAliases?: Record<string, string> | ((canonicalTools: readonly string[]) => Record<string, string>);
   /** Available models using server-side credentials/configuration; never return secrets. */
   listModels?(context: ModelDiscoveryContext): HarnessModel[] | Promise<HarnessModel[]>;
   /** Launch a stdio ACP v1 agent; non-ACP harnesses must supply an adapter. */
@@ -123,6 +127,8 @@ export interface PluginHost {
   registerHarness(harness: HarnessPlugin): void;
   /** Register a server-default candidate, selectable via rendering.defaultToolRenderer. */
   registerRenderer(renderer: EventRenderer): void;
+  /** Register an automatic canonical per-tool renderer; it is not a selectable global default. */
+  registerToolRenderer(renderer: EventRenderer): void;
   registerEndpoint(
     name: string,
     handler: (params: unknown, caller: Caller) => unknown | Promise<unknown>,

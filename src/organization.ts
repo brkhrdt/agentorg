@@ -257,16 +257,22 @@ export class Organization implements PluginHost {
   registerHarness(harness: HarnessPlugin) {
     if (this.harnesses.has(harness.name))
       throw new Error(`Duplicate harness ${harness.name}`);
-    this.renderers.registerHarness(harness.name, harness.renderers ?? []);
+    this.renderers.registerHarness(harness.name, harness.renderers ?? [], harness.toolAliases ?? {});
     this.harnesses.set(harness.name, harness);
   }
   registerRenderer(renderer: EventRenderer) { this.renderers.register(renderer); }
+  registerToolRenderer(renderer: EventRenderer) { this.renderers.registerToolRenderer(renderer); }
+  validateRendererRegistrations() { this.renderers.validateRegistrations(this.tools.keys()); }
   renderEvent(event: ServerEvent) {
     const harness = event.agentId ? this.agents.get(event.agentId)?.settings.harness : undefined;
     let presentation = event;
     try { presentation = this.store.presentationEvent(event); }
     catch { /* Missing/unreadable context must not interrupt raw event delivery. */ }
-    return this.renderers.render(presentation, harness, String(this.serverSettings("rendering").defaultToolRenderer));
+    const input = presentation.data && typeof presentation.data === "object" ? (presentation.data as Record<string, any>).rawInput : undefined;
+    const targetId = input && typeof input.agentId === "string" ? input.agentId : undefined;
+    const recipient = targetId ? this.agents.get(targetId) ?? [...this.agents.values()].find(agent => agent.sessionId === targetId) : undefined;
+    // Pass display-only context; never replace text inside original inputs/results.
+    return this.renderers.render(presentation, harness, String(this.serverSettings("rendering").defaultToolRenderer), { targetName: recipient?.name });
   }
   registerEndpoint(
     name: string,
@@ -286,6 +292,7 @@ export class Organization implements PluginHost {
     if (!/^[a-zA-Z0-9_]+$/.test(tool.name) || this.tools.has(tool.name))
       throw new Error(`Invalid/duplicate tool ${tool.name}`);
     this.tools.set(tool.name, tool);
+    this.renderers.toolRegistered(tool.name);
   }
   transformTool(
     name: string,

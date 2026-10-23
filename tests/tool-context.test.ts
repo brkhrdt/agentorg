@@ -28,7 +28,7 @@ for (const tool of ["bash", "read", "write", "edit", "mcp__agentorg__create_suba
     const original = JSON.stringify([call, update, failed, completed]);
     const summaries = [call, update, failed, completed].map(e => renderTool(store.presentationEvent(e)).summary);
     expect(new Set(summaries).size).toBe(1);
-    if (tool === "bash") expect(summaries[0]).toBe(`$ ${command}`);
+    if (tool === "bash") expect(summaries[0]).toBe("• bash");
     for (const e of [update, failed, completed]) {
       const view = store.presentationEvent(e);
       expect((view.data as any).title).toBe(tool);
@@ -51,11 +51,11 @@ test("context lookup is fenced by agent, generation, event sequence and prompt/s
   emit(store, "tool.call", { toolCallId: "parallel-id", title: "bash", rawInput: { command: "parallel" } });
   const result = emit(store, "tool.result", { toolCallId: "same", status: "completed" });
   const parallel = emit(store, "tool.result", { toolCallId: "parallel-id", status: "completed" });
-  expect(renderTool(store.presentationEvent(parallel)).summary).toBe("$ parallel");
+  expect(store.presentationEvent(parallel).data).toHaveProperty("rawInput.command", "parallel");
   emit(store, "tool.call", { toolCallId: "same", title: "bash", rawInput: { command: "future" } });
-  expect(renderTool(store.presentationEvent(result)).summary).toBe("$ first");
+  expect(store.presentationEvent(result).data).toHaveProperty("rawInput.command", "first");
   const reused = emit(store, "tool.result", { toolCallId: "same", status: "completed" });
-  expect(renderTool(store.presentationEvent(reused)).summary).toBe("$ future");
+  expect(store.presentationEvent(reused).data).toHaveProperty("rawInput.command", "future");
   emit(store, "prompt.started", {});
   const orphan = emit(store, "tool.result", { toolCallId: "same", status: "completed" });
   expect(store.presentationEvent(orphan)).toEqual(orphan);
@@ -74,12 +74,12 @@ test("reopened history and single-record pages recover context; available metada
   try {
     const page = reopened.history(result.seq - 1, 1);
     expect(page.events).toHaveLength(1);
-    expect(renderTool(reopened.presentationEvent(page.events[0]!)).summary).toBe("$ python3 --version");
+    expect(reopened.presentationEvent(page.events[0]!).data).toHaveProperty("rawInput.command", "python3 --version");
   } finally { reopened.close(); }
   emit(store, "tool.call", { toolCallId: "y", title: "read", rawInput: {} }, "agent", "g1", 2);
   emit(store, "tool.update", { toolCallId: "y", title: "read", rawInput: { path: "retained.txt" } }, "agent", "g1", 2);
   const sparse = emit(store, "tool.result", { toolCallId: "y", status: "completed" }, "agent", "g1", 2);
-  expect(renderTool(store.presentationEvent(sparse)).summary).toBe("\\< retained.txt");
+  expect(store.presentationEvent(sparse).data).toHaveProperty("rawInput.path", "retained.txt");
   const expired = emit(store, "tool.result", { toolCallId: "y", status: "completed" }, "agent", "g1", 1);
   expect(store.presentationEvent(expired)).toEqual(expired);
 }));
@@ -90,7 +90,7 @@ test("context never overwrites authoritative adapter arguments or inherits previ
   expect(store.presentationEvent(explicit)).toBe(explicit);
   const sparse = emit(store, "tool.result", { toolCallId: "x" });
   const view = store.presentationEvent(sparse);
-  expect(renderTool(view).summary).toBe("$ authoritative");
+  expect(view.data).toHaveProperty("rawInput.command", "authoritative");
   expect(view.data).not.toHaveProperty("status"); expect(view.data).not.toHaveProperty("rawOutput");
 }));
 
@@ -112,7 +112,7 @@ test("live and paginated JSONL rendering resolve the harness renderer using reco
     const phases = events.filter(e => e.type.startsWith("tool."));
     expect(phases).toHaveLength(3);
     for (const e of phases) {
-      expect(presentations.get(e.seq).summary).toBe(`$ ${command}`);
+      expect(presentations.get(e.seq).summary).toBe("• bash");
       expect(presentations.get(e.seq).rendererId).toBe("pi/bash");
       const page: any = await client.request("events.history", { after: e.seq - 1, limit: 1, renderings: true });
       expect(page.events).toEqual([e]); expect(page.renderings[e.seq]).toEqual(presentations.get(e.seq));

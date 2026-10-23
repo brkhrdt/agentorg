@@ -93,9 +93,11 @@ export function pluginHost(host: PluginHost, name: string): PluginHost {
         launch: wrap(harness.launch.bind(harness), launchSpec),
         ...(harness.listModels && { listModels: wrap(harness.listModels.bind(harness)) }),
         ...(harness.renderers && { renderers: harness.renderers.map(renderer => ({ ...renderer, render: wrap(renderer.render.bind(renderer)) })) }),
+        ...(typeof harness.toolAliases === "function" && { toolAliases: wrap(harness.toolAliases.bind(harness)) }),
       });
     },
     registerRenderer: renderer => host.registerRenderer({ ...renderer, render: wrap(renderer.render.bind(renderer)) }),
+    registerToolRenderer: renderer => host.registerToolRenderer({ ...renderer, render: wrap(renderer.render.bind(renderer)) }),
     registerEndpoint: (endpoint, handler) => host.registerEndpoint(endpoint, wrap(handler)),
     registerTool: definition => host.registerTool(tool(definition)),
     transformTool: (toolName, transform) => host.transformTool(toolName, wrap(transform, tool)),
