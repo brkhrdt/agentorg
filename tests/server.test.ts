@@ -362,8 +362,10 @@ test("fire-and-return continuation preserves authenticated child results under p
   expect(continuation.status).toBe("running");
   const generated = (continuation.input as any).text as string;
   const payload = JSON.parse(generated.slice(generated.indexOf("\n") + 1));
-  expect(payload.notification).toContain("Child work has settled");
+  expect(payload.notification).toContain("finished their work");
   expect(payload.outcomes).toHaveLength(2);
+  expect(payload.outcomes.every((item: any) => item.name && item.type === "agent.prompt")).toBe(true);
+  expect(payload.notification).toContain(`@${payload.outcomes[0].name}`);
   expect(payload.outcomes.map((item: any) => item.status)).toEqual(["completed", "completed"]);
   expect(payload.outcomes.every((item: any) => item.resultAvailable && item.previewUntrusted === true && item.preview.text.startsWith("done:"))).toBe(true);
   expect(payload.warning).toContain("untrusted");
@@ -461,7 +463,7 @@ test("startup preserves persisted cancellation intent and never replays the deli
   const batchId = crypto.randomUUID();
   const member: Operation = { id: crypto.randomUUID(), type: "agent.prompt", agentId: root.id, input: {}, caller: { kind: "server", id: "test" }, status: "completed", createdAt: now(), completedAt: now(), result: "retained" };
   expect(store.admitCompletionOperation(member, { parentAgentId: root.id, parentSessionId: root.sessionId, rootOperationId: batchId }, [root.id], 4)).toBe(true);
-  const continuation: Operation = { id: crypto.randomUUID(), type: "agent.prompt", agentId: root.id, input: { text: `Review child completion batch ${batchId}` }, caller: { kind: "server", id: "server" }, status: "running", createdAt: now(), cancelRequested: true };
+  const continuation: Operation = { id: crypto.randomUUID(), type: "agent.prompt", agentId: root.id, input: { text: `Your child agents have finished their work. ${batchId}` }, caller: { kind: "server", id: "server" }, status: "running", createdAt: now(), cancelRequested: true };
   store.saveOperation(continuation);
   const batch = store.completionBatches()[0]!; batch.state = "dispatching"; batch.continuationOperationId = continuation.id; store.setCompletionBatch(batch);
   store.close();
@@ -690,7 +692,7 @@ test("shutdown preserves an interrupted notification through no-recover until ex
   expect(pausedBatch.interruptionReason).toBe("server-shutdown");
   expect(pausedBatch.state).toBe("ready");
   expect(restarted.organization.store.pinnedOperationIds()).toHaveLength(pausedBatch.memberOperationIds.length);
-  expect([...restarted.organization.operations.values()].filter(operation => operation.input && (operation.input as any).text?.includes(`Review child completion batch ${parent.id}`)).map(operation => operation.id)).toEqual([oldId]);
+  expect([...restarted.organization.operations.values()].filter(operation => operation.input && (operation.input as any).text?.includes(`\"batchId\":\"${parent.id}\"`)).map(operation => operation.id)).toEqual([oldId]);
   await Bun.write(join(dir, `continuation-${parent.id}.release`), "release");
   await paused.wait(await paused.request("agent.restart", { agentId: root.id }));
   await until(() => restarted.organization.store.completionBatches().find(batch => batch.identity.rootOperationId === parent.id)?.state === "dispatched");
@@ -848,6 +850,9 @@ test("authenticated descendant prompts enroll durable server provenance, includi
   const batch = server.organization.store.completionBatches()[0];
   expect(batch.identity).toEqual({ parentAgentId: root.id, parentSessionId: root.sessionId, rootOperationId: parent.id });
   expect(batch.memberOperationIds).toContain(issued.id);
+  expect((issued.input as any).text).toBe(`@${root.name} sleep:20`);
+  const queued = server.organization.store.history(0, 10000).events.find(event => event.type === "prompt.queued" && (event.data as any).operationId === issued.id)!;
+  expect(queued.data).toMatchObject({ text: `@${root.name} sleep:20`, promptCue: { version: 1, bodyStart: `@${root.name} `.length } });
   await until(() => server.organization.operations.get(issued.id)?.status === "completed");
   expect(server.organization.store.completionBatches()[0].memberStatuses?.[issued.id]).toBe("completed");
   await client.wait(parent);
@@ -1075,7 +1080,7 @@ test("failed completion dispatch retries after storage recovery and heals serial
   const dispatch = store.dispatchCompletion.bind(store);
   let attempts = 0;
   (store as any).dispatchCompletion = (...args: any[]) => { attempts++; return (dispatch as any)(...args); };
-  store.db.exec(`CREATE TRIGGER reject_completion_dispatch BEFORE INSERT ON operations WHEN json_extract(NEW.data, '$.caller.id')='server' AND json_extract(NEW.data, '$.input.text') LIKE 'Review child completion batch%' BEGIN SELECT RAISE(ABORT, 'injected dispatch transaction failure'); END`);
+  store.db.exec(`CREATE TRIGGER reject_completion_dispatch BEFORE INSERT ON operations WHEN json_extract(NEW.data, '$.caller.id')='server' AND json_extract(NEW.data, '$.input.text') LIKE 'Your child agents have finished their work%' BEGIN SELECT RAISE(ABORT, 'injected dispatch transaction failure'); END`);
   const parent = await client.wait(await prompt(client, root.id, "delegate-return"));
   const findBatch = () => store.completionBatches().find(batch => batch.identity.rootOperationId === parent.id)!;
   await until(() => findBatch()?.state === "ready" && attempts > 0);
@@ -1098,7 +1103,7 @@ test("failed completion dispatch retries after storage recovery and heals serial
 test("continuation start persistence failure retains queue ownership and retries after storage recovers", async () => {
   const { client, server } = await setup();
   const root = await create(client);
-  server.organization.store.db.exec(`CREATE TRIGGER reject_continuation_start BEFORE INSERT ON operations WHEN json_extract(NEW.data, '$.caller.id')='server' AND json_extract(NEW.data, '$.input.text') LIKE 'Review child completion batch%' AND json_extract(NEW.data, '$.status')='running' BEGIN SELECT RAISE(ABORT, 'injected start persistence failure'); END`);
+  server.organization.store.db.exec(`CREATE TRIGGER reject_continuation_start BEFORE INSERT ON operations WHEN json_extract(NEW.data, '$.caller.id')='server' AND json_extract(NEW.data, '$.input.text') LIKE 'Your child agents have finished their work%' AND json_extract(NEW.data, '$.status')='running' BEGIN SELECT RAISE(ABORT, 'injected start persistence failure'); END`);
   const parent = await client.wait(await prompt(client, root.id, "delegate-return"));
   const batchForParent = () => server.organization.store.completionBatches().find(batch => batch.identity.rootOperationId === parent.id)!;
   await until(() => batchForParent()?.state === "dispatching" && !!(server.organization as any).runtimes.get(root.id)?.startRetry);
@@ -1118,7 +1123,7 @@ test("continuation start persistence failure retains queue ownership and retries
 test("prompt.finished and continuation operation.changed event failures cannot strand completion work", async () => {
   const { client, server } = await setup();
   const root = await create(client);
-  server.organization.store.db.exec(`CREATE TRIGGER reject_completion_diagnostics BEFORE INSERT ON events WHEN json_extract(NEW.data, '$.type')='prompt.finished' OR (json_extract(NEW.data, '$.type')='operation.changed' AND json_extract(NEW.data, '$.data.caller.id')='server' AND json_extract(NEW.data, '$.data.input.text') LIKE 'Review child completion batch%') BEGIN SELECT RAISE(ABORT, 'injected completion event failure'); END`);
+  server.organization.store.db.exec(`CREATE TRIGGER reject_completion_diagnostics BEFORE INSERT ON events WHEN json_extract(NEW.data, '$.type')='prompt.finished' OR (json_extract(NEW.data, '$.type')='operation.changed' AND json_extract(NEW.data, '$.data.caller.id')='server' AND json_extract(NEW.data, '$.data.input.text') LIKE 'Your child agents have finished their work%') BEGIN SELECT RAISE(ABORT, 'injected completion event failure'); END`);
   const parent = await client.wait(await prompt(client, root.id, "delegate-return"));
   expect(parent.status).toBe("completed");
   await until(() => (server.organization.agents.get(root.id)?.state === "idle") && server.organization.store.completionBatches().some(batch => batch.identity.rootOperationId === parent.id && batch.state === "dispatched"));
@@ -1195,8 +1200,30 @@ test("client prompts are unattributed and completion capacity rejection has no c
   expect(server.organization.operations.get(childWork.id)?.status).toBe("running");
   const clientPrompt = await prompt(client, grandchild.id, "client-origin", true);
   expect(clientPrompt.promptProvenance).toBeUndefined();
+  expect((clientPrompt.input as any).text).toBe("client-origin");
   await client.wait(parent);
   await client.wait(childWork);
+});
+
+test("non-enrolled direct agent prompts receive one issuer cue while client prompts remain unchanged", async () => {
+  const { client, server } = await setup();
+  const root = await create(client), child = await create(client, root.id);
+  const direct = await server.organization.request("agent.prompt", { agentId: child.id, text: "direct @mention\nbody" }, { kind: "agent", id: root.id }) as Operation;
+  expect(direct.promptProvenance).toBeUndefined();
+  expect((direct.input as any).text).toBe(`@${root.name} direct @mention\nbody`);
+  const human = await prompt(client, child.id, "human body");
+  expect((human.input as any).text).toBe("human body");
+});
+
+test("issuer mention bytes count toward the prompt cap before admission side effects", async () => {
+  const { client, server } = await setup({ maxPromptBytes: 16 });
+  const root = await create(client), child = await create(client, root.id);
+  const before = server.organization.operations.size;
+  await expect(server.organization.request("agent.prompt", { agentId: child.id, text: "1234567890123456" }, { kind: "agent", id: root.id })).rejects.toMatchObject({ code: "LIMIT" });
+  expect(server.organization.operations.size).toBe(before);
+  expect((server.organization as any).runtimes.get(child.id).queue).toHaveLength(0);
+  const accepted = await prompt(client, child.id, "1234567890123456");
+  expect((accepted.input as any).text).toBe("1234567890123456");
 });
 
 test("live filters, monotonically increasing durable events, malformed requests", async () => {

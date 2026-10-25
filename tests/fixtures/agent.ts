@@ -2,7 +2,7 @@ import * as acp from "@agentclientprotocol/sdk";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { Readable, Writable } from "node:stream";
-import { existsSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { OrganizationClient } from "../../src/client.ts";
 import type { AgentRecord, Operation } from "../../src/types.ts";
@@ -65,11 +65,15 @@ acp
   })
   .onRequest("session/prompt", async (ctx) => {
     cancelled = false;
-    const text = ctx.params.prompt
+    const incomingText = ctx.params.prompt
       .map((b) => (b.type === "text" ? b.text : ""))
       .join("");
-    if (text.startsWith("Review child completion batch ")) {
-      const batchId = text.match(/Review child completion batch ([^\\.\\n]+)/)?.[1];
+    if (process.env.PROMPT_CAPTURE_FILE) appendFileSync(process.env.PROMPT_CAPTURE_FILE, `${JSON.stringify({ sessionId, text: incomingText })}\n`);
+    const completion = incomingText.match(/\n(\{.*\})$/s)?.[1];
+    if (completion) {
+      let batchId: string | undefined;
+      try { batchId = JSON.parse(completion).batchId; } catch {}
+
       if (batchId) {
         if (process.env.COMPLETION_BARRIER_DIR) {
           writeFileSync(join(process.env.COMPLETION_BARRIER_DIR, `continuation-${batchId}.started`), "started");
@@ -79,6 +83,8 @@ acp
         if (mcpServers[0]) await inspectCompletionBatch(batchId);
       }
     }
+    // This fake harness recognizes the fixture's single-token issuer names; production adapters never strip the core cue.
+    const text = incomingText.replace(/^@[^ ]+ /, "");
     if (text === "sibling-barrier" && process.env.SIBLING_BARRIER_DIR) {
       writeFileSync(join(process.env.SIBLING_BARRIER_DIR, "sibling.started"), "started");
       while (!existsSync(join(process.env.SIBLING_BARRIER_DIR, "sibling.release"))) await delay(10);

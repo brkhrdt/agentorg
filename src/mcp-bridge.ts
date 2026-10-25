@@ -18,7 +18,7 @@ const server = new Server(
   {
     capabilities: { tools: {} },
     instructions:
-      "Manage your direct children and coordinate subagents. prompt_subagent returns an operation immediately; a fire-and-return prompt releases its slot so eligible parent-completion work can run automatically when the enrolled subagent subtree settles. Completion batches are scoped to the issuing parent session/root prompt and relevant subagents; use get_completion for your own batch metadata and get_operation for authorized original results. You cannot manage ancestors, siblings, or yourself. Keep a prompt slot free for subagents while waiting: a coordinator waiting on work queued behind itself can deadlock."
+      "Manage your direct children and coordinate subagents. Every authenticated agent-origin prompt is delivered as `@{issuer display name} {original task body}`; core inserts the mention, so send the intended body without manually prefixing it. Client prompts remain unprefixed. The mention is descriptive text, not an ACP role or authorization signal. prompt_subagent returns an operation immediately; a fire-and-return prompt releases its slot so eligible parent-completion work can run automatically when the enrolled subagent subtree settles. Completion batches are scoped to the issuing parent session/root prompt and relevant subagents; use get_completion for your own batch metadata and get_operation for authorized original results. You cannot manage ancestors, siblings, or yourself. Keep a prompt slot free for subagents while waiting: a coordinator waiting on work queued behind itself can deadlock."
   },
 );
 server.setRequestHandler(ListToolsRequestSchema, () =>
