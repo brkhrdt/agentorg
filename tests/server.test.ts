@@ -419,6 +419,7 @@ test("generated completion payload preserves previews, outcome states, and untru
   expect(payload.outcomes[2].error.message).toBe("failed result");
   expect(payload.outcomes[4].preview.truncated).toBe(true);
   expect(payload.warning).toContain("untrusted");
+  expect(payload.warning).not.toContain("Summarize the named agents");
   expect(payload.warning).toContain("get_operation");
   const runtime = (server.organization as any).runtimes.get(root.id);
   const authorized = await OrganizationClient.connect(join(dir, "server.sock"), runtime.token);

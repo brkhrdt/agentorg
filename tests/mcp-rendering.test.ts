@@ -90,6 +90,37 @@ test("bounded decoder supports valid values and adapter blocks without guessing 
     expect(decodeMcpOutput(event("wait_operation", output)).truncated).toBe(true);
 });
 
+test("get_operation renders child prompt replies and child creation settings at the requested levels", () => {
+  const prompt = renderMcpTool("get_operation", event("get_operation", envelope({
+    id: "op-prompt", type: "agent.prompt", agentId: "child-id", status: "completed",
+    result: { text: "# Review\nTwo **useful** findings.", truncated: false },
+  })), { targetName: "Reviewer", issuerName: "Coordinator" });
+  expect(prompt.summary).toBe("Reviewer: @Coordinator # Review Two **useful** findings.");
+  expect(prompt.extended.split("\n")).toEqual(["Reviewer: @Coordinator # Review", "Two **useful** findings."]);
+  expect(prompt.full).toBe("Reviewer: @Coordinator # Review\nTwo **useful** findings.");
+  expect(prompt.toolTargets).toEqual(["Reviewer", "@Coordinator"]);
+
+  const created = renderMcpTool("get_operation", event("get_operation", envelope({
+    id: "op-create", type: "agent.create", status: "completed",
+    result: { id: "child-id", name: "Coder", settings: { harness: "pi", model: "gpt-6-luna", provider: "openai-codex", cwd: "/workspace", options: { thinking: "low" }, env: { TOKEN: "redacted" } } },
+  })));
+  expect(created.summary).toBe("Creating subagent Coder in /workspace");
+  expect(created.extended.split("\n")).toEqual([
+    "Creating subagent Coder in /workspace",
+    'harness: pi · model: gpt-6-luna · provider: openai-codex · options: \\{ "thinking": "low" \\}',
+  ]);
+  expect(created.full).toContain('"TOKEN": "redacted"');
+  expect(created.full).toContain('"cwd": "/workspace"');
+  expect(created.toolTargets).toEqual(["Coder"]);
+
+  const fallback = renderMcpTool("get_operation", event("get_operation", envelope({
+    id: "op-modify", type: "agent.modify", status: "completed", result: { revision: 4 },
+  })));
+  expect(fallback.full).toContain("Decoded MCP value:");
+  expect(fallback.full).toContain('"revision": 4');
+  expect(fallback.full).not.toContain("Creating subagent");
+});
+
 test("lifecycle and agent details reflect actual nested result contracts without promoting child answers", () => {
   const replaced = renderMcpTool("replace_subagent_session", event("replace_subagent_session", envelope({ id: "op", status: "completed", result: { state: "running", sessionId: "session-2", sessionNumber: 2 } }), { agentId: "child" }));
   expect(replaced.full).toContain("sessionNumber: 2"); expect(replaced.full).toContain("sessionId: session-2");
@@ -163,13 +194,16 @@ test("prompt display names never rewrite received payloads, and late tools inval
   } }] });
   try {
     const org = server.organization;
-    org.agents.set("parent", { id: "parent", settings: { harness: "h" } } as AgentRecord);
+    org.agents.set("parent", { id: "parent", name: "Coordinator", settings: { harness: "h" } } as AgentRecord);
     org.agents.set("child-id", { id: "child-id", name: "[Reviewer] *one*", sessionId: "session-id" } as AgentRecord);
     const e = event("prefix_prompt_subagent", envelope({ answer: "Keep @child-id literally" }), { agentId: "child-id", text: "Keep @child-id literally", queue: true });
     const original = structuredClone(e), rendering = org.renderEvent(e)!;
     expect(rendering.summary).toStartWith("@\\[Reviewer\\] \\*one\\*"); expect(rendering.toolTarget).toBe("@[Reviewer] *one*");
     expect(rendering.full).toContain('"text": "Keep @child-id literally"'); expect(rendering.full).toContain('"answer\\":\\"Keep @child-id literally');
     expect(e).toEqual(original);
+    org.operations.set("operation-prompt", { id: "operation-prompt", type: "agent.prompt", agentId: "child-id", caller: { kind: "agent", id: "parent" }, status: "completed", input: {}, result: { text: "A child response", truncated: false }, createdAt: "now" });
+    const inspected = org.renderEvent(event("prefix_get_operation", envelope({ a: true, s: "completed", t: false, r: { text: "A child response", truncated: false } }), { operationId: "operation-prompt" }))!;
+    expect(inspected.summary).toBe("\\[Reviewer\\] \\*one\\*: @Coordinator A child response");
     await org.request("events.renderers");
     org.registerTool({ name: "late_tool", description: "late", inputSchema: { type: "object" }, execute: () => null });
     org.registerToolRenderer(descriptor("late.renderer", "late_tool"));

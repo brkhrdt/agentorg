@@ -107,6 +107,47 @@ function domainDetails(tool: McpToolName, value: unknown): string[] {
   }
   return details;
 }
+function renderInspectedOperation(d: Record<string, any>, context: Readonly<RenderContext>): RenderLevels | undefined {
+  const operationType = typeof d.type === "string" ? d.type : context.operationType;
+  const result = d.result ?? d.r;
+  const resultRecord = record(result);
+  if (operationType === "agent.prompt") {
+    const text = typeof resultRecord.text === "string" ? resultRecord.text : typeof result === "string" ? result : undefined;
+    if (text === undefined) return;
+    const provenance = record(d.promptProvenance);
+    const child = context.targetName ?? (typeof d.agentId === "string" ? d.agentId : "child");
+    const parent = context.issuerName ?? (typeof provenance.parentAgentId === "string" ? provenance.parentAgentId : "parent");
+    const heading = `${literalMarkdown(child)}: @${literalMarkdown(parent)}`;
+    const preview = oneLine(text) || "[No response text]";
+    const responseLines = text.split(/\r\n?|\n|\u2028|\u2029/).map(line => line.replace(/\s+/g, " ").trim()).filter(Boolean);
+    const isTruncated = resultRecord.truncated === true || d.t === true;
+    const extended = `${heading}${responseLines.length ? ` ${responseLines[0]}` : " [No response text]"}${isTruncated ? " [TRUNCATED]" : ""}${responseLines[1] ? `\n${responseLines[1]}` : ""}`;
+    return {
+      summary: `${heading}${text ? ` ${preview}` : ""}${isTruncated ? " [TRUNCATED]" : ""}`,
+      extended,
+      full: `${heading}${text ? ` ${text}` : ""}${isTruncated ? "\n\n[TRUNCATED]" : ""}`,
+      updateMode: "semantic",
+      toolTargets: [child, `@${parent}`],
+    };
+  }
+  if (operationType === "agent.create") {
+    const inputSettings = record(record(d.input).settings);
+    const settings = Object.keys(record(resultRecord.settings)).length ? record(resultRecord.settings) : inputSettings;
+    if (!Object.keys(settings).length && typeof resultRecord.name !== "string") return;
+    const child = typeof resultRecord.name === "string" ? resultRecord.name : context.targetName ?? "unknown";
+    const cwd = typeof settings.cwd === "string" ? settings.cwd : "[default cwd]";
+    const heading = literalMarkdown(`Creating subagent ${child} in ${cwd}`);
+    const general = Object.entries(settings).filter(([key]) => key !== "cwd" && key !== "env")
+      .map(([key, value]) => `${key}: ${oneLine(value)}`).join(" · ") || "General settings unavailable";
+    return {
+      summary: heading,
+      extended: `${heading}\n${literalMarkdown(general)}`,
+      full: `${heading}\n\nSettings:\n${fenced(pretty(settings), "json")}`,
+      updateMode: "semantic",
+      toolTargets: [child],
+    };
+  }
+}
 function subject(tool: McpToolName, input: Record<string, any>, context: Readonly<RenderContext>): { title: string; target?: string } {
   if (tool === "prompt_subagent") {
     const name = oneLine(context.targetName ?? idFor(input, "agentId", "[agent unavailable]")).slice(0, 254).replace(/[\uD800-\uDBFF]$/, "");
@@ -122,7 +163,12 @@ function subject(tool: McpToolName, input: Record<string, any>, context: Readonl
 }
 export function renderMcpTool(tool: McpToolName, event: Readonly<ServerEvent>, context: Readonly<RenderContext> = {}): RenderLevels {
   const data = record(event.data), args = record(data.rawInput), decoded = decodeMcpOutput(event, tool);
-  const domain = decoded.complete ? decoded.domain : undefined, d = record(domain), state = domainState(tool, d), details = domainDetails(tool, domain);
+  const domain = decoded.complete ? decoded.domain : undefined, d = record(domain);
+  if (tool === "get_operation" && !decoded.warning) {
+    const inspected = renderInspectedOperation(d, context);
+    if (inspected) return { ...inspected, toolSymbol: "∴", invocationError: decoded.invocationError || ["failed", "cancelled", "canceled"].includes(data.status) };
+  }
+  const state = domainState(tool, d), details = domainDetails(tool, domain);
   if (tool === "prompt_subagent") details.push(`Prompt policy: ${args.queue === true ? "queue" : "supersede"}`);
   if (tool === "modify_subagent") { details.push(`Changed fields: ${Object.keys(args).filter(key => !["agentId", "expectedRevision"].includes(key)).join(", ") || "none"}`); if (args.expectedRevision !== undefined) details.push(`Expected revision: ${args.expectedRevision}`); }
   if (decoded.warning) details.push(decoded.warning);
