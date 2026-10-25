@@ -68,6 +68,7 @@ export function pluginHost(host: PluginHost, name: string): PluginHost {
         ...extension,
         validate: wrap(extension.validate.bind(extension)),
         ...(extension.launchKey && { launchKey: wrap(extension.launchKey.bind(extension)) }),
+        ...(extension.snapshotMetadata && { snapshotMetadata: wrap(extension.snapshotMetadata.bind(extension)) }),
         ...(extension.migrate && { migrate: wrap(extension.migrate.bind(extension)) }),
       });
     },
