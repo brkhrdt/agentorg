@@ -338,6 +338,9 @@ test("fire-and-return continuation preserves authenticated child results under p
   await until(() => batchForParent()?.state === "dispatching");
   const batch = batchForParent();
   expect(batch.memberOperationIds).toHaveLength(2);
+  const ready = server.organization.store.history(0, 10000).events.find(event => event.type === "completion.ready" && (event.data as any).batchId === parent.id)!;
+  expect((ready.data as any).childNames.sort()).toEqual(["code", "tests"]);
+  expect((ready.data as any).childCount).toBe(2);
   expect(batch.continuationOperationId).toBeTruthy();
   await until(() => existsSync(join(dir, `continuation-${parent.id}.started`)));
   const rt = (server.organization as any).runtimes.get(root.id);

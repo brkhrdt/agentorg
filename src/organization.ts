@@ -658,7 +658,12 @@ export class Organization implements PluginHost {
         this.store.setCompletionBatch(batch);
         changed = true;
         // Persisted readiness must survive a failed observer/diagnostic event.
-        try { this.emit("completion.ready", { batchId: batch.identity.rootOperationId, operationCount: batch.memberOperationIds.length }, batch.identity.parentAgentId); } catch {}
+        const childNames = [...new Set(batch.memberOperationIds.flatMap(operationId => {
+          const agentId = this.operations.get(operationId)?.agentId;
+          const name = agentId ? this.agents.get(agentId)?.name : undefined;
+          return name ? [name] : [];
+        }))];
+        try { this.emit("completion.ready", { batchId: batch.identity.rootOperationId, operationCount: batch.memberOperationIds.length, childNames: childNames.slice(0, 8), childCount: childNames.length }, batch.identity.parentAgentId); } catch {}
       } else if (!ready && batch.state === "ready") {
         batch.state = "collecting";
         this.store.setCompletionBatch(batch);
