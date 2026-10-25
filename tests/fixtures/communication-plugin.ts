@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { mkdirSync, writeFileSync } from "node:fs";
 import type { ServerPlugin } from "../../src/plugin.ts";
+import { coreMcpRenderers } from "../../src/mcp-tool-rendering.ts";
 
 /** Deterministic ACP fixture for adjacent-communication validation. */
 const communicationPlugin: ServerPlugin = {
@@ -9,6 +10,8 @@ const communicationPlugin: ServerPlugin = {
   setup(host) {
     host.registerHarness({
       name: "communication-fixture",
+      toolAliases: names => Object.fromEntries(names.map(name => [`mcp__agentorg__${name}`, name])),
+      renderers: coreMcpRenderers().filter(renderer => renderer.tool === "prompt_parent").map(renderer => ({ ...renderer, tool: "mcp__agentorg__prompt_parent" })),
       launch(context) {
         const capabilityDirectory = process.env.AGENTORG_COMMUNICATION_CAP_DIR;
         if (capabilityDirectory) {

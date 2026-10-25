@@ -64,6 +64,6 @@ try {
   const tuiParentPrompt = await operator.request<Operation>("agent.prompt", { agentId: child.id, text: "tui-parent-render-check", queue: true });
   check((await operator.wait(tuiParentPrompt, 15_000)).status === "completed", "TUI parent-render fixture prompt did not complete");
   const childHistory = await operator.request<any>("events.history", { agentId: child.id });
-  check(childHistory.events.some((event: any) => event.type === "tool.call" && event.data?.toolName === "mcp__agentorg__prompt_parent" && event.data?.rawInput?.text === "TUI parent renderer marker"), "parent-render fixture event missing from child history");
+  check(childHistory.events.some((event: any) => event.type === "tool.call" && (event.data?.toolName === "mcp__agentorg__prompt_parent" || event.data?.title === "mcp__agentorg__prompt_parent") && event.data?.rawInput?.text === "TUI parent renderer marker"), `parent-render fixture event missing from child history: ${JSON.stringify(childHistory.events)}`);
   console.log(JSON.stringify({ ok: true, agents: { root: root.id, child: child.id, grandchild: grandchild.id, sibling: sibling.id }, operations: [direct, relay, gUp, cUp, operatorPrompt].map(op => ({ id: op.id, target: op.agentId, caller: op.caller.id, type: op.type })), denied: { mcpGrandchild: true, rawGrandchild: true }, fullTreeSnapshots: true, upwardDefaultQueue: true, operatorGrandchild: true }));
 } finally { for (const client of clients) client.close(); operator.close(); }
