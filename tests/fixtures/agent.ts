@@ -169,16 +169,28 @@ acp
         }
       } finally { await mcp.close(); }
     }
-    await ctx.client.notify("session/update", {
-      sessionId,
-      update: {
-        sessionUpdate: "tool_call",
-        toolCallId: crypto.randomUUID(),
-        title: "fixture tool",
-        status: "completed",
-        rawOutput: { ok: true },
-      },
-    });
+    if (text === "tui-parent-render-check") {
+      const toolCallId = crypto.randomUUID();
+      await ctx.client.notify("session/update", { sessionId, update: {
+        sessionUpdate: "tool_call", toolCallId, title: "Parent report", toolName: "mcp__agentorg__prompt_parent",
+        status: "pending", rawInput: { text: "TUI parent renderer marker" },
+      } });
+      await ctx.client.notify("session/update", { sessionId, update: {
+        sessionUpdate: "tool_call_update", toolCallId, title: "Parent report", toolName: "mcp__agentorg__prompt_parent",
+        status: "completed", rawOutput: { content: [{ type: "text", text: JSON.stringify({ id: "probe-operation", status: "queued" }) }], isError: false },
+      } });
+    } else {
+      await ctx.client.notify("session/update", {
+        sessionId,
+        update: {
+          sessionUpdate: "tool_call",
+          toolCallId: crypto.randomUUID(),
+          title: "fixture tool",
+          status: "completed",
+          rawOutput: { ok: true },
+        },
+      });
+    }
     await ctx.client.notify("session/update", {
       sessionId,
       update: {

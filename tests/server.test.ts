@@ -272,9 +272,12 @@ test("MCP SDK bridge enforces direct-child creation and subtree permissions", as
   await mcp.connect(transport);
   try {
     expect((server.organization as any).mcpServers(rt.token)[0].name).toBe("agentorg");
-    expect((await mcp.listTools()).tools.map((tool) => tool.name)).toEqual([
+    const listedTools = (await mcp.listTools()).tools;
+    expect(listedTools.find((tool) => tool.name === "prompt_parent")?.description).toContain("only when explicitly instructed");
+    expect(listedTools.map((tool) => tool.name)).toEqual([
       "create_subagent",
       "prompt_subagent",
+      "prompt_parent",
       "get_subagent",
       "snapshot_organization",
       "stop_subagent",
@@ -840,7 +843,8 @@ test("authenticated descendant prompts enroll durable server provenance, includi
   const grandchild = await create(client, child.id);
   const parent = await prompt(client, root.id, "sleep:300");
   await until(() => server.organization.operations.get(parent.id)?.status === "running");
-  const issued = await server.organization.request("agent.prompt", { agentId: grandchild.id, text: "sleep:20" }, { kind: "agent", id: root.id }) as Operation;
+  await expect(server.organization.request("agent.prompt", { agentId: grandchild.id, text: "denied" }, { kind: "agent", id: root.id })).rejects.toMatchObject({ code: "FORBIDDEN" });
+  const issued = await server.organization.request("agent.prompt", { agentId: child.id, text: "sleep:20" }, { kind: "agent", id: root.id }) as Operation;
   expect(issued.promptProvenance).toMatchObject({
     kind: "parent-completion", parentOperationId: parent.id, parentAgentId: root.id,
     parentSessionId: root.sessionId, parentGeneration: root.generation,
@@ -851,6 +855,49 @@ test("authenticated descendant prompts enroll durable server provenance, includi
   await until(() => server.organization.operations.get(issued.id)?.status === "completed");
   expect(server.organization.store.completionBatches()[0].memberStatuses?.[issued.id]).toBe("completed");
   await client.wait(parent);
+});
+
+test("adjacent prompt directions resolve targets server-side and snapshots expose the full tree", async () => {
+  const { client, server } = await setup();
+  const root = await create(client);
+  const child = await create(client, root.id);
+  const grandchild = await create(client, child.id);
+  const sibling = await create(client, root.id);
+  const snapshot = await server.organization.request("organization.snapshot", {}, { kind: "agent", id: grandchild.id }) as any;
+  expect(snapshot.agents.map((agent: AgentRecord) => agent.id)).toEqual(expect.arrayContaining([root.id, child.id, grandchild.id, sibling.id]));
+  await expect(server.organization.request("agent.prompt", { agentId: grandchild.id, text: "skip" }, { kind: "agent", id: root.id })).rejects.toMatchObject({ code: "FORBIDDEN" });
+  await expect(server.organization.request("agent.prompt_parent", { text: "spoof", agentId: root.id }, { kind: "agent", id: grandchild.id })).rejects.toThrow();
+  const upward = await server.organization.request("agent.prompt_parent", { text: "upward marker" }, { kind: "agent", id: grandchild.id }) as Operation;
+  expect(upward).toMatchObject({ type: "agent.prompt", agentId: child.id, caller: { kind: "agent", id: grandchild.id }, input: { agentId: child.id, text: "upward marker", queue: true } });
+  expect(upward.promptProvenance).toBeUndefined();
+  await expect(server.organization.request("agent.prompt_parent", { text: "root" }, { kind: "agent", id: root.id })).rejects.toMatchObject({ code: "NO_PARENT" });
+  await client.wait(upward);
+});
+
+test("real agent capabilities enforce adjacent prompt relay and expose full snapshots", async () => {
+  const { client, server } = await setup();
+  const root = await create(client), child = await create(client, root.id), grandchild = await create(client, child.id), sibling = await create(client, root.id);
+  const org = server.organization as any;
+  const tokenClient = async (id: string) => OrganizationClient.connect(org.socketPath, org.runtimes.get(id).token);
+  const rootCap = await tokenClient(root.id), childCap = await tokenClient(child.id), grandchildCap = await tokenClient(grandchild.id);
+  try {
+    const direct = await rootCap.request<any>("mcp.call", { name: "prompt_subagent", arguments: { agentId: child.id, text: "root-to-child" } });
+    expect(direct.isError).not.toBe(true);
+    const down = JSON.parse(direct.content[0].text);
+    expect(down).toMatchObject({ type: "agent.prompt", agentId: child.id, caller: { kind: "agent", id: root.id } });
+    const denied = await rootCap.request<any>("mcp.call", { name: "prompt_subagent", arguments: { agentId: grandchild.id, text: "skip" } });
+    expect(denied.isError).toBe(true); expect(denied.content[0].text).toContain("FORBIDDEN");
+    await expect(rootCap.request<any>("agent.prompt", { agentId: grandchild.id, text: "raw skip" })).rejects.toMatchObject({ code: "FORBIDDEN" });
+    const snapshot = await childCap.request<any>("organization.snapshot", {});
+    expect(snapshot.agents.map((a: AgentRecord) => a.id)).toEqual(expect.arrayContaining([root.id, child.id, grandchild.id, sibling.id]));
+    const relay = await childCap.request<any>("mcp.call", { name: "prompt_subagent", arguments: { agentId: grandchild.id, text: "relay-marker" } });
+    expect(relay.isError).not.toBe(true);
+    const downRelay = JSON.parse(relay.content[0].text);
+    expect(downRelay).toMatchObject({ agentId: grandchild.id, caller: { kind: "agent", id: child.id } });
+    const up = await grandchildCap.request<any>("mcp.call", { name: "prompt_parent", arguments: { text: "grandchild-report" } });
+    expect(up.isError).not.toBe(true);
+    expect(JSON.parse(up.content[0].text)).toMatchObject({ agentId: child.id, caller: { kind: "agent", id: grandchild.id }, input: { agentId: child.id, text: "grandchild-report", queue: true } });
+  } finally { rootCap.close(); childCap.close(); grandchildCap.close(); }
 });
 
 test("settled completion batches become ready and a late member revokes readiness", async () => {
@@ -1189,14 +1236,17 @@ test("client prompts are unattributed and completion capacity rejection has no c
   await until(() => server.organization.operations.get(childWork.id)?.status === "running");
   const parent = await prompt(client, root.id, "sleep:500");
   await until(() => server.organization.operations.get(parent.id)?.status === "running");
-  const enrolled = await server.organization.request("agent.prompt", { agentId: grandchild.id, text: "sleep:10" }, { kind: "agent", id: root.id }) as Operation;
+  const enrolled = await server.organization.request("agent.prompt", { agentId: child.id, text: "sleep:10", queue: true }, { kind: "agent", id: root.id }) as Operation;
   expect(enrolled.promptProvenance?.kind).toBe("parent-completion");
   await expect(server.organization.request("agent.prompt", { agentId: child.id, text: "replacement" }, { kind: "agent", id: root.id })).rejects.toMatchObject({ code: "LIMIT" });
   expect(server.organization.operations.get(childWork.id)?.status).toBe("running");
+  expect(server.organization.operations.get(childWork.id)?.cancelRequested).not.toBe(true);
+  expect(server.organization.operations.get(enrolled.id)?.cancelRequested).not.toBe(true);
   const clientPrompt = await prompt(client, grandchild.id, "client-origin", true);
   expect(clientPrompt.promptProvenance).toBeUndefined();
   await client.wait(parent);
-  await client.wait(childWork);
+  expect((await client.wait(childWork)).status).toBe("completed");
+  expect((await client.wait(enrolled)).status).toBe("completed");
 });
 
 test("live filters, monotonically increasing durable events, malformed requests", async () => {

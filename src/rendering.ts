@@ -10,7 +10,7 @@ export interface RenderLevels {
   toolSymbol?: string; toolTarget?: string; toolPrompt?: string; invocationError?: boolean;
 }
 /** Presentation-only facts. Received event fields are never rewritten. */
-export interface RenderContext { targetName?: string }
+export interface RenderContext { targetName?: string; parentTargetName?: string }
 /** Pure synchronous server-side Markdown; clients own all terminal styling. */
 export interface EventRenderer {
   id: string; name: string; eventTypes: string[]; tool?: string;
@@ -167,6 +167,7 @@ export class RendererRegistry {
     return owned;
   }
   canonicalTools(): string[] { return [...new Set([...this.knownTools, ...this.automatic.keys()])].sort(); }
+  canonicalTool(harness: string | undefined, identity: string | undefined): string | undefined { return identity ? this.aliasesFor(harness)[identity] ?? identity : undefined; }
   toolRegistered(name: string) { this.knownTools.add(name); this.invalidate(); }
   validateRegistrations(toolNames: Iterable<string>) {
     this.knownTools = new Set(toolNames); this.invalidate();

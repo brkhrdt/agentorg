@@ -6,7 +6,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { z } from "zod";
 import type * as acp from "@agentclientprotocol/sdk";
 import { Store } from "./store.ts";
-import { RendererRegistry, type EventRenderer } from "./rendering.ts";
+import { RendererRegistry, toolIdentity, type EventRenderer } from "./rendering.ts";
 import { ServerSettingsRegistry, coreSettings, type ServerSettingsDefinition } from "./server-settings.ts";
 import { workerArgs } from "./runtime.ts";
 import { completePath } from "./path-completion.ts";
@@ -271,8 +271,12 @@ export class Organization implements PluginHost {
     const input = presentation.data && typeof presentation.data === "object" ? (presentation.data as Record<string, any>).rawInput : undefined;
     const targetId = input && typeof input.agentId === "string" ? input.agentId : undefined;
     const recipient = targetId ? this.agents.get(targetId) ?? [...this.agents.values()].find(agent => agent.sessionId === targetId) : undefined;
-    // Pass display-only context; never replace text inside original inputs/results.
-    return this.renderers.render(presentation, harness, String(this.serverSettings("rendering").defaultToolRenderer), { targetName: recipient?.name });
+    const emittedTool = toolIdentity(presentation);
+    const canonicalTool = this.renderers.canonicalTool(harness, emittedTool);
+    const parent = event.agentId ? this.agents.get(event.agentId)?.parentId : undefined;
+    const parentName = parent ? this.agents.get(parent)?.name : undefined;
+    // Display context only; the renderer matches canonical aliases and never changes API inputs.
+    return this.renderers.render(presentation, harness, String(this.serverSettings("rendering").defaultToolRenderer), { targetName: recipient?.name, parentTargetName: canonicalTool === "prompt_parent" ? parentName : undefined });
   }
   registerEndpoint(
     name: string,
@@ -769,13 +773,59 @@ export class Organization implements PluginHost {
     });
     return structuredClone(op);
   }
+  private validatePromptCapability(caller: Caller, authenticatedAgent?: AuthenticatedAgentContext) {
+    if (caller.kind === "agent" && authenticatedAgent) {
+      const runtime = this.runtimes.get(caller.id), agent = this.agents.get(caller.id);
+      if (!runtime || !agent || runtime.generation !== authenticatedAgent.generation || agent.sessionId !== authenticatedAgent.sessionId)
+        throw new ApiError("FORBIDDEN", "Expired agent capability");
+    }
+  }
+  private admitPrompt(agentId: string, text: string, queue: boolean, caller: Caller, authenticatedAgent: AuthenticatedAgentContext | undefined, downward: boolean) {
+    if (Buffer.byteLength(text) > this.limits.maxPromptBytes) throw new ApiError("LIMIT", "Prompt size limit reached");
+    return this.serialize(() => {
+      this.validatePromptCapability(caller, authenticatedAgent);
+      if (downward && caller.kind === "agent") {
+        const target = this.agents.get(agentId);
+        if (!target || target.parentId !== caller.id) throw new ApiError("FORBIDDEN", "Agents may prompt only an immediate child");
+      } else if (downward) this.authorize(caller, agentId, true);
+      return this.admitPromptLocked(agentId, text, queue, caller, downward);
+    });
+  }
+  private admitPromptLocked(agentId: string, text: string, queue: boolean, caller: Caller, downward: boolean) {
+    if (Buffer.byteLength(text) > this.limits.maxPromptBytes) throw new ApiError("LIMIT", "Prompt size limit reached");
+    const a = this.agent(agentId), rt = this.runtimes.get(a.id);
+    if (!rt || ["stopped", "failed", "starting"].includes(a.state)) throw new ApiError("NOT_RUNNING", "Agent is not available");
+    if (queue && rt.queue.length >= this.limits.maxQueuedPrompts) throw new ApiError("LIMIT", "Prompt queue limit reached");
+    const parentRuntime = downward && caller.kind === "agent" ? this.runtimes.get(caller.id) : undefined;
+    const parentAgent = downward && caller.kind === "agent" ? this.agents.get(caller.id) : undefined;
+    const parentOperation = parentRuntime?.active?.op;
+    const enrolled = !!(parentAgent && parentOperation && parentOperation.type === "agent.prompt" && !terminal(parentOperation) && this.isDescendant(a.id, caller.id, false));
+    const op: Operation = { id: crypto.randomUUID(), type: "agent.prompt", agentId: a.id, input: { agentId: a.id, text, queue }, caller: structuredClone(caller), status: "queued", createdAt: now() };
+    if (enrolled) {
+      const parentSessionId = parentAgent!.sessionId;
+      if (!parentSessionId) throw new ApiError("NOT_RUNNING", "Issuing agent has no active session");
+      op.promptProvenance = { kind: "parent-completion", parentOperationId: parentOperation!.id, parentAgentId: caller.id, parentSessionId, parentGeneration: parentRuntime!.generation };
+      const identity = { parentAgentId: caller.id, parentSessionId, rootOperationId: parentOperation!.id };
+      if (!this.store.admitCompletionOperation(op, identity, [a.id], this.limits.maxPendingCompletionOperations)) throw new ApiError("LIMIT", "Parent-completion operation capacity reached");
+      this.operations.set(op.id, op); this.emit("operation.changed", op, op.agentId ?? undefined);
+      for (const id of this.store.pruneTerminalOperations(this.limits.maxOperations)) this.operations.delete(id);
+    } else { this.operations.set(op.id, op); this.saveOp(op); }
+    if (!queue) {
+      for (const queued of rt.queue.splice(0)) this.finish(queued, "stopped", undefined, new ApiError("SUPERSEDED", "Prompt superseded"));
+      if (rt.active) this.cancelPrompt(a, rt, rt.active);
+    }
+    rt.queue.push(op);
+    if (!rt.active) this.state(a, "waiting");
+    this.emit("prompt.queued", { operationId: op.id, text }, a.id, rt.generation);
+    return structuredClone(op);
+  }
   async request(
     method: string,
     params: unknown = {},
     caller: Caller = { kind: "server", id: "server" },
     authenticatedAgent?: AuthenticatedAgentContext,
   ): Promise<unknown> {
-    if (this.mutationContext.getStore() && /^(agent\.(create|modify|stop|restart|restart_subtree|replace_session|remove|prompt)|operation\.(wait|cancel)|organization\.settings\.update)$/.test(method))
+    if (this.mutationContext.getStore() && /^(agent\.(create|modify|stop|restart|restart_subtree|replace_session|remove|prompt|prompt_parent)|operation\.(wait|cancel)|organization\.settings\.update)$/.test(method))
       throw new ApiError("NESTED_MUTATION", "Lifecycle hooks cannot enqueue or wait for mutations");
     if (this.closing)
       throw new ApiError("SHUTTING_DOWN", "Server is shutting down");
@@ -823,12 +873,7 @@ export class Organization implements PluginHost {
         }).strict().parse(params);
         return {
           seq: this.store.sequence(),
-          agents: [...this.agents.values()]
-            .filter(
-              (a) =>
-                caller.kind !== "agent" || this.isDescendant(a.id, caller.id),
-            )
-            .map((a) => structuredClone(a)),
+          agents: [...this.agents.values()].map((a) => structuredClone(a)),
           capabilities: {
             cwd: this.cwd,
             ...(caller.kind !== "agent" && { serverSettings: {
@@ -1112,78 +1157,20 @@ export class Organization implements PluginHost {
         });
       }
       case "agent.prompt": {
-        const p = z
-          .object({
-            agentId: z.string(),
-            text: z.string().min(1),
-            queue: z.boolean().default(false),
-          })
-          .strict()
-          .parse(params);
-        this.authorize(caller, p.agentId, true);
-        if (Buffer.byteLength(p.text) > this.limits.maxPromptBytes)
-          throw new ApiError("LIMIT", "Prompt size limit reached");
+        const p = z.object({ agentId: z.string(), text: z.string().min(1), queue: z.boolean().default(false) }).strict().parse(params);
+        return this.admitPrompt(p.agentId, p.text, p.queue, caller, authenticatedAgent, true);
+      }
+      case "agent.prompt_parent": {
+        const p = z.object({ text: z.string().min(1), queue: z.boolean().default(true) }).strict().parse(params);
+        if (caller.kind !== "agent") throw new ApiError("FORBIDDEN", "Only agents may prompt their parent");
         return this.serialize(() => {
-          const a = this.agent(p.agentId);
-          const rt = this.runtimes.get(a.id);
-          if (!rt || ["stopped", "failed", "starting"].includes(a.state))
-            throw new ApiError("NOT_RUNNING", "Agent is not available");
-          if (p.queue && rt.queue.length >= this.limits.maxQueuedPrompts)
-            throw new ApiError("LIMIT", "Prompt queue limit reached");
-          if (caller.kind === "agent" && authenticatedAgent) {
-            const currentRuntime = this.runtimes.get(caller.id);
-            const currentAgent = this.agents.get(caller.id);
-            if (!currentRuntime || !currentAgent || currentRuntime.generation !== authenticatedAgent.generation || currentAgent.sessionId !== authenticatedAgent.sessionId)
-              throw new ApiError("FORBIDDEN", "Expired agent capability");
-          }
-          const parentRuntime = caller.kind === "agent" ? this.runtimes.get(caller.id) : undefined;
-          const parentAgent = caller.kind === "agent" ? this.agents.get(caller.id) : undefined;
-          const parentOperation = parentRuntime?.active?.op;
-          const enrolled = !!(parentAgent && parentOperation && parentOperation.type === "agent.prompt" && !terminal(parentOperation) && this.isDescendant(a.id, caller.id, false));
-          const op: Operation = {
-            id: crypto.randomUUID(), type: method, agentId: a.id,
-            input: structuredClone(p), caller: structuredClone(caller), status: "queued", createdAt: now(),
-          };
-          if (enrolled) {
-            const parentSessionId = parentAgent!.sessionId;
-            if (!parentSessionId) throw new ApiError("NOT_RUNNING", "Issuing agent has no active session");
-            const provenance = {
-              kind: "parent-completion" as const,
-              parentOperationId: parentOperation!.id,
-              parentAgentId: caller.id,
-              parentSessionId,
-              parentGeneration: parentRuntime!.generation,
-            };
-            op.promptProvenance = provenance;
-            const identity = { parentAgentId: caller.id, parentSessionId, rootOperationId: parentOperation!.id };
-            if (!this.store.admitCompletionOperation(op, identity, [a.id], this.limits.maxPendingCompletionOperations))
-              throw new ApiError("LIMIT", "Parent-completion operation capacity reached");
-            this.operations.set(op.id, op);
-            this.emit("operation.changed", op, op.agentId ?? undefined);
-            for (const id of this.store.pruneTerminalOperations(this.limits.maxOperations)) this.operations.delete(id);
-          } else {
-            this.operations.set(op.id, op);
-            this.saveOp(op);
-          }
-          if (!p.queue) {
-            for (const queued of rt.queue.splice(0))
-              this.finish(
-                queued,
-                "stopped",
-                undefined,
-                new ApiError("SUPERSEDED", "Prompt superseded"),
-              );
-            if (rt.active) this.cancelPrompt(a, rt, rt.active);
-          }
-          rt.queue.push(op);
-          if (!rt.active) this.state(a, "waiting");
-          this.emit(
-            "prompt.queued",
-            { operationId: op.id, text: p.text },
-            a.id,
-            rt.generation,
-          );
-          return structuredClone(op);
+          this.validatePromptCapability(caller, authenticatedAgent);
+          const source = this.agents.get(caller.id);
+          if (!source) throw new ApiError("NOT_FOUND", "Agent not found");
+          if (!source.parentId) throw new ApiError("NO_PARENT", "Root agent has no parent");
+          const parent = this.agents.get(source.parentId);
+          if (!parent) throw new ApiError("NOT_FOUND", "Parent agent not found");
+          return this.admitPromptLocked(parent.id, p.text, p.queue, caller, false);
         });
       }
       case "completion.get": {
@@ -1776,9 +1763,16 @@ export class Organization implements PluginHost {
     add(
       "prompt_subagent",
       "agent.prompt",
-      "Send work to a strict descendant. If called by an active agent prompt, the accepted operation is enrolled in that parent session/root prompt's completion batch. Returning without wait_operation is fire-and-return: the server may send one automatic continuation to the issuing parent after enrolled relevant descendant work settles. Default supersedes active/queued work; queue=true appends FIFO. Returns immediately with the original operation ID. Keep a prompt slot free; waiting while all slots are occupied can deadlock.",
+      "Prompt an immediate child only; relay through children for deeper work. If called by an active agent prompt, accepted downward work may be enrolled in that prompt's completion batch. Default supersedes active/queued work; queue=true appends FIFO. Returns immediately with the operation ID. Prefer fire-and-return to avoid prompt-slot deadlocks.",
       { agentId: id, text: id, queue: { type: "boolean" } },
       ["agentId", "text"],
+    );
+    add(
+      "prompt_parent",
+      "agent.prompt_parent",
+      "Use only when explicitly instructed to prompt or report to your parent; do not send unsolicited parent updates. Targets your implicit direct parent; no target ID is accepted. Defaults to queueing (queue=false explicitly supersedes). Root agents receive NO_PARENT. Send and return rather than waiting on a parent that may be waiting for you. Deeper reporting must relay one adjacent hop at a time.",
+      { text: id, queue: { type: "boolean" } },
+      ["text"],
     );
     add(
       "get_subagent",
@@ -1790,7 +1784,7 @@ export class Organization implements PluginHost {
     add(
       "snapshot_organization",
       "organization.snapshot",
-      "List your authorized subtree and operations. includeTerminalOperations=false omits every terminal status (including interrupted), even pinned completion results; full snapshots retain their existing shape. Completion batch metadata is separate and queried with get_completion.",
+      "List full-tree agent records (including other branches); this visibility does not grant prompt authority. Operations remain scoped by existing authorization. includeTerminalOperations=false omits terminal operations; completion metadata remains separately scoped through get_completion.",
       { includeTerminalOperations: { type: "boolean" } },
     );
     for (const [action, toolName] of [
