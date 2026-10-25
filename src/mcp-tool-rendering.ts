@@ -64,9 +64,10 @@ function domainState(tool: McpToolName, d: Record<string, any>): string | undefi
   const value = tool === "get_completion" ? d.state ?? d.s : tool === "get_subagent" ? d.state : d.status ?? d.s;
   return typeof value === "string" ? oneLine(value) : undefined;
 }
-function domainDetails(tool: McpToolName, value: unknown): string[] {
+function domainDetails(tool: McpToolName, value: unknown, context: Readonly<RenderContext>): string[] {
   const d = record(value), result = record(has(d, "r") ? d.r : d.result), state = domainState(tool, d), details: string[] = [];
   if (state) details.push(`${tool === "get_completion" ? "Batch status" : tool === "get_subagent" ? "Agent state" : "Returned status"}: ${state}`);
+  if (tool === "get_operation" && context.targetName) details.push(`Agent: ${oneLine(context.targetName)}`);
   if (tool === "get_operation" && typeof d.t === "boolean") details.push(`Result truncated: ${d.t ? "yes" : "no"}`);
   if (typeof d.cancelRequested === "boolean") details.push(`Cancellation requested: ${d.cancelRequested ? "yes" : "no"}`);
   if (d.error !== undefined) details.push(`Error: ${oneLine(d.error)}`);
@@ -107,47 +108,6 @@ function domainDetails(tool: McpToolName, value: unknown): string[] {
   }
   return details;
 }
-function renderInspectedOperation(d: Record<string, any>, context: Readonly<RenderContext>): RenderLevels | undefined {
-  const operationType = typeof d.type === "string" ? d.type : context.operationType;
-  const result = d.result ?? d.r;
-  const resultRecord = record(result);
-  if (operationType === "agent.prompt") {
-    const text = typeof resultRecord.text === "string" ? resultRecord.text : typeof result === "string" ? result : undefined;
-    if (text === undefined) return;
-    const provenance = record(d.promptProvenance);
-    const child = context.targetName ?? (typeof d.agentId === "string" ? d.agentId : "child");
-    const parent = context.issuerName ?? (typeof provenance.parentAgentId === "string" ? provenance.parentAgentId : "parent");
-    const heading = `${literalMarkdown(child)}: @${literalMarkdown(parent)}`;
-    const preview = oneLine(text) || "[No response text]";
-    const responseLines = text.split(/\r\n?|\n|\u2028|\u2029/).map(line => line.replace(/\s+/g, " ").trim()).filter(Boolean);
-    const isTruncated = resultRecord.truncated === true || d.t === true;
-    const extended = `${heading}${responseLines.length ? ` ${responseLines[0]}` : " [No response text]"}${isTruncated ? " [TRUNCATED]" : ""}${responseLines[1] ? `\n${responseLines[1]}` : ""}`;
-    return {
-      summary: `${heading}${text ? ` ${preview}` : ""}${isTruncated ? " [TRUNCATED]" : ""}`,
-      extended,
-      full: `${heading}${text ? ` ${text}` : ""}${isTruncated ? "\n\n[TRUNCATED]" : ""}`,
-      updateMode: "semantic",
-      toolTargets: [child, `@${parent}`],
-    };
-  }
-  if (operationType === "agent.create") {
-    const inputSettings = record(record(d.input).settings);
-    const settings = Object.keys(record(resultRecord.settings)).length ? record(resultRecord.settings) : inputSettings;
-    if (!Object.keys(settings).length && typeof resultRecord.name !== "string") return;
-    const child = typeof resultRecord.name === "string" ? resultRecord.name : context.targetName ?? "unknown";
-    const cwd = typeof settings.cwd === "string" ? settings.cwd : "[default cwd]";
-    const heading = literalMarkdown(`Creating subagent ${child} in ${cwd}`);
-    const general = Object.entries(settings).filter(([key]) => key !== "cwd" && key !== "env")
-      .map(([key, value]) => `${key}: ${oneLine(value)}`).join(" · ") || "General settings unavailable";
-    return {
-      summary: heading,
-      extended: `${heading}\n${literalMarkdown(general)}`,
-      full: `${heading}\n\nSettings:\n${fenced(pretty(settings), "json")}`,
-      updateMode: "semantic",
-      toolTargets: [child],
-    };
-  }
-}
 function subject(tool: McpToolName, input: Record<string, any>, context: Readonly<RenderContext>): { title: string; target?: string } {
   if (tool === "prompt_subagent") {
     const name = oneLine(context.targetName ?? idFor(input, "agentId", "[agent unavailable]")).slice(0, 254).replace(/[\uD800-\uDBFF]$/, "");
@@ -157,18 +117,14 @@ function subject(tool: McpToolName, input: Record<string, any>, context: Readonl
   const args = tool === "snapshot_organization" ? input.includeTerminalOperations === false ? "active operations" : "all operations"
     : tool === "create_subagent" ? [input.name, record(input.settings).harness, record(input.settings).model].filter(value => typeof value === "string" && value).map(oneLine).join(" · ") || "child request"
     : tool === "get_completion" ? `batch ${idFor(input, "batchId", "[batch unavailable]")}`
-    : ["get_operation", "wait_operation", "cancel_operation"].includes(tool) ? idFor(input, "operationId", "[operation unavailable]")
+    : ["get_operation", "wait_operation", "cancel_operation"].includes(tool) ? [idFor(input, "operationId", "[operation unavailable]"), tool === "get_operation" && context.targetName ? oneLine(context.targetName) : undefined].filter(Boolean).join(" · ")
     : `agent ${idFor(input, "agentId", "[agent unavailable]")}`;
   return { title: `${labels[tool]} · ${args}` };
 }
 export function renderMcpTool(tool: McpToolName, event: Readonly<ServerEvent>, context: Readonly<RenderContext> = {}): RenderLevels {
   const data = record(event.data), args = record(data.rawInput), decoded = decodeMcpOutput(event, tool);
   const domain = decoded.complete ? decoded.domain : undefined, d = record(domain);
-  if (tool === "get_operation" && !decoded.warning) {
-    const inspected = renderInspectedOperation(d, context);
-    if (inspected) return { ...inspected, toolSymbol: "∴", invocationError: decoded.invocationError || ["failed", "cancelled", "canceled"].includes(data.status) };
-  }
-  const state = domainState(tool, d), details = domainDetails(tool, domain);
+  const state = domainState(tool, d), details = domainDetails(tool, domain, context);
   if (tool === "prompt_subagent") details.push(`Prompt policy: ${args.queue === true ? "queue" : "supersede"}`);
   if (tool === "modify_subagent") { details.push(`Changed fields: ${Object.keys(args).filter(key => !["agentId", "expectedRevision"].includes(key)).join(", ") || "none"}`); if (args.expectedRevision !== undefined) details.push(`Expected revision: ${args.expectedRevision}`); }
   if (decoded.warning) details.push(decoded.warning);
@@ -179,10 +135,11 @@ export function renderMcpTool(tool: McpToolName, event: Readonly<ServerEvent>, c
   const status = invocationError ? "failed invocation" : state ?? (data.status ? `${String(data.status).replace(/_/g, " ")} invocation` : "Status unavailable");
   const priority = [status, decoded.truncated && "[TRUNCATED]", decoded.warning && "[UNDECODED]", ...details.filter(text => !/^(Returned status:|Batch status:|Agent state:|Tool invocation:|Invocation |\[TRUNCATED\])/.test(text)).slice(0, 3)].filter(Boolean).join(" · ");
   const { title, target } = subject(tool, args, context), heading = literalMarkdown(title);
+  const operationAgentTargets = tool === "get_operation" && context.targetName ? [context.targetName] : undefined;
   const identity = toolIdentity(event) ?? tool;
   const full = [heading, literalMarkdown(priority), `Tool: ${literalMarkdown(identity)}`, ...details.map(literalMarkdown),
     `Input:\n${fenced(pretty(data.rawInput), "json")}`, `Received result:\n${fenced(pretty(has(data, "rawOutput") ? data.rawOutput : data.content), "json")}`, `Decoded MCP value:\n${fenced(pretty(decoded.domain), "json")}`].join("\n\n");
-  return { summary: heading, extended: `${heading}\n${literalMarkdown(priority)}`, full, updateMode: "semantic", extendedLayout: "header-detail", toolSymbol: "∴", ...(target && { toolTarget: target }), ...(tool === "prompt_subagent" && { toolPrompt: typeof args.text === "string" ? args.text : "" }), invocationError };
+  return { summary: heading, extended: `${heading}\n${literalMarkdown(priority)}`, full, updateMode: "semantic", extendedLayout: "header-detail", toolSymbol: "∴", ...(target && { toolTarget: target }), ...(operationAgentTargets && { toolTargets: operationAgentTargets }), ...(tool === "prompt_subagent" && { toolPrompt: typeof args.text === "string" ? args.text : "" }), invocationError };
 }
 const exampleInputs: Record<McpToolName, unknown> = {
   create_subagent:{name:"reviewer",settings:{harness:"pi",model:"provider/model"}}, prompt_subagent:{agentId:"child-1",text:"Review the implementation",queue:true}, get_subagent:{agentId:"child-1"}, snapshot_organization:{includeTerminalOperations:false}, stop_subagent:{agentId:"child-1"}, restart_subagent:{agentId:"child-1"}, restart_subagent_subtree:{agentId:"child-1"}, replace_subagent_session:{agentId:"child-1"}, remove_subagent:{agentId:"child-1"}, modify_subagent:{agentId:"child-1",expectedRevision:3,settings:{model:"provider/model"}}, get_completion:{batchId:"operation-1",after:0,limit:20}, get_operation:{operationId:"operation-1",resultOnly:true}, wait_operation:{operationId:"operation-1",waitMs:1000}, cancel_operation:{operationId:"operation-1"},

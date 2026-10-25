@@ -273,12 +273,9 @@ export class Organization implements PluginHost {
     const recipient = targetId ? this.agents.get(targetId) ?? [...this.agents.values()].find(agent => agent.sessionId === targetId) : undefined;
     const operation = input && typeof input.operationId === "string" ? this.operations.get(input.operationId) : undefined;
     const operationAgent = operation?.agentId ? this.agents.get(operation.agentId) : undefined;
-    const issuer = event.agentId ? this.agents.get(event.agentId) : undefined;
     // Pass display-only context; never replace text inside original inputs/results.
     return this.renderers.render(presentation, harness, String(this.serverSettings("rendering").defaultToolRenderer), {
       targetName: recipient?.name ?? operationAgent?.name,
-      issuerName: issuer?.name,
-      operationType: operation?.type,
     });
   }
   registerEndpoint(

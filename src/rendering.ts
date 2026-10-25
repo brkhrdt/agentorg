@@ -10,7 +10,7 @@ export interface RenderLevels {
   toolSymbol?: string; toolTarget?: string; toolTargets?: string[]; toolPrompt?: string; invocationError?: boolean;
 }
 /** Presentation-only facts. Received event fields are never rewritten. */
-export interface RenderContext { targetName?: string; issuerName?: string; operationType?: string }
+export interface RenderContext { targetName?: string }
 /** Pure synchronous server-side Markdown; clients own all terminal styling. */
 export interface EventRenderer {
   id: string; name: string; eventTypes: string[]; tool?: string;
