@@ -66,6 +66,8 @@ interface Runtime {
 export interface AuthenticatedAgentContext {
   generation: string;
   sessionId: string;
+  responsePreflight?: (result: unknown, mcpResponse: boolean) => void;
+  mcpResponse?: boolean;
 }
 interface Permission {
   agentId: string;
@@ -980,14 +982,14 @@ export class Organization implements PluginHost {
           const compact = { parent: parentRecord ? { agentId: parentRecord.id, name: parentRecord.name } : null, subagents: children.map(agent => ({ agentId: agent.id, name: agent.name })) };
           const preflight = (response: unknown) => {
             const raw = JSON.stringify(response);
-            const mcp = JSON.stringify({ content: [{ type: "text", text: raw }] });
-            if (Buffer.byteLength(raw) > this.limits.maxResponseBytes || Buffer.byteLength(mcp) + 1 > this.limits.maxClientBufferBytes)
+            if (Buffer.byteLength(raw) > this.limits.maxResponseBytes)
               throw new ApiError("LIMIT", "Snapshot response exceeds transport limits");
+            authenticatedAgent?.responsePreflight?.(response, authenticatedAgent.mcpResponse === true);
           };
           preflight(compact);
           if (p.path === undefined) return compact;
           const settings = structuredClone(self.settings);
-          if (!settings.cwd) throw new ApiError("FORBIDDEN", "Export requires an explicit caller cwd");
+          if (!settings.cwd || !this.store.cwdWasExplicit(self.id)) throw new ApiError("FORBIDDEN", "Export requires an explicitly configured caller cwd");
           const cwd = resolve(settings.cwd);
           const destination = resolve(cwd, p.path);
           const rel = relative(cwd, destination);
@@ -1179,6 +1181,7 @@ export class Organization implements PluginHost {
           try {
             await this.applyMutation(transaction.changes);
             changes = this.commitSettings(a, transaction.related);
+            this.store.setCwdExplicit(a.id, p.settings.cwd !== undefined);
           } catch (error) {
             await this.rollbackMutation(transaction.changes);
             throw error;
@@ -1242,6 +1245,7 @@ export class Organization implements PluginHost {
               a.sessionNumber++;
             }
             changes = this.commitSettings(a, transaction.related);
+            if (p.settings?.cwd !== undefined) this.store.setCwdExplicit(a.id, true);
           } catch (error) {
             await this.rollbackMutation(transaction.changes);
             if (launchChanged && active) {
@@ -1485,8 +1489,9 @@ export class Organization implements PluginHost {
         const tool = this.tools.get(p.name);
         if (!tool) throw new ApiError("NOT_FOUND", "Unknown MCP tool");
         try {
+          const toolAgentContext = authenticatedAgent ? { ...authenticatedAgent, mcpResponse: true } : undefined;
           const result = bounded(
-            await tool.execute(p.arguments, caller, this, authenticatedAgent),
+            await tool.execute(p.arguments, caller, this, toolAgentContext),
             this.limits.maxResponseBytes,
           );
           return {

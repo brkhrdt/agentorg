@@ -17,6 +17,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
       INSERT OR IGNORE INTO meta VALUES ('schema', 1), ('sequence', 0);
       CREATE TABLE IF NOT EXISTS agents (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS agent_flags (agent_id TEXT PRIMARY KEY, cwd_explicit INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS server_settings (namespace TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY, agent_id TEXT, data TEXT NOT NULL);
@@ -65,6 +66,12 @@ export class Store {
     this.db
       .query("INSERT OR REPLACE INTO agents VALUES (?, ?)")
       .run(agent.id, JSON.stringify(agent));
+  }
+  setCwdExplicit(agentId: string, explicit: boolean) {
+    this.db.query("INSERT OR REPLACE INTO agent_flags (agent_id, cwd_explicit) VALUES (?, ?)").run(agentId, explicit ? 1 : 0);
+  }
+  cwdWasExplicit(agentId: string): boolean {
+    return this.db.query<{ cwd_explicit: number }, [string]>("SELECT cwd_explicit FROM agent_flags WHERE agent_id=?").get(agentId)?.cwd_explicit === 1;
   }
   saveAgents(agents: AgentRecord[]) {
     this.db.transaction(() => {
