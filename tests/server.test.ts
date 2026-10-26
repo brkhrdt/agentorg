@@ -912,14 +912,15 @@ test("authenticated descendant prompts enroll durable server provenance, includi
   await client.wait(parent);
 });
 
-test("adjacent prompt directions resolve targets server-side and snapshots expose the full tree", async () => {
+test("adjacent prompt directions resolve targets server-side and snapshots expose parent and direct children", async () => {
   const { client, server } = await setup();
   const root = await create(client);
   const child = await create(client, root.id);
   const grandchild = await create(client, child.id);
   const sibling = await create(client, root.id);
   const snapshot = await server.organization.request("organization.snapshot", {}, { kind: "agent", id: grandchild.id }) as any;
-  expect(snapshot.agents.map((agent: AgentRecord) => agent.id)).toEqual(expect.arrayContaining([root.id, child.id, grandchild.id, sibling.id]));
+  expect(snapshot).toEqual({ parent: { agentId: child.id, name: child.name }, subagents: [] });
+  expect(snapshot).not.toHaveProperty("parentId");
   await expect(server.organization.request("agent.prompt", { agentId: grandchild.id, text: "skip" }, { kind: "agent", id: root.id })).rejects.toMatchObject({ code: "FORBIDDEN" });
   await expect(server.organization.request("agent.prompt_parent", { text: "spoof", agentId: root.id }, { kind: "agent", id: grandchild.id })).rejects.toThrow();
   const upward = await server.organization.request("agent.prompt_parent", { text: "upward marker" }, { kind: "agent", id: grandchild.id }) as Operation;
@@ -929,7 +930,7 @@ test("adjacent prompt directions resolve targets server-side and snapshots expos
   await client.wait(upward);
 });
 
-test("real agent capabilities enforce adjacent prompt relay and expose full snapshots", async () => {
+test("real agent capabilities enforce adjacent prompt relay and scoped snapshots", async () => {
   const { client, server } = await setup();
   const root = await create(client), child = await create(client, root.id), grandchild = await create(client, child.id), sibling = await create(client, root.id);
   const org = server.organization as any;
@@ -944,7 +945,9 @@ test("real agent capabilities enforce adjacent prompt relay and expose full snap
     expect(denied.isError).toBe(true); expect(denied.content[0].text).toContain("FORBIDDEN");
     await expect(rootCap.request<any>("agent.prompt", { agentId: grandchild.id, text: "raw skip" })).rejects.toMatchObject({ code: "FORBIDDEN" });
     const snapshot = await childCap.request<any>("organization.snapshot", {});
-    expect(snapshot.agents.map((a: AgentRecord) => a.id)).toEqual(expect.arrayContaining([root.id, child.id, grandchild.id, sibling.id]));
+    expect(snapshot.parent).toEqual({ agentId: root.id, name: root.name });
+    expect(snapshot.subagents).toEqual([{ agentId: grandchild.id, name: grandchild.name }]);
+    expect(snapshot).not.toHaveProperty("operations");
     const relay = await childCap.request<any>("mcp.call", { name: "prompt_subagent", arguments: { agentId: grandchild.id, text: "relay-marker" } });
     expect(relay.isError).not.toBe(true);
     const downRelay = JSON.parse(relay.content[0].text);
@@ -1547,7 +1550,7 @@ test("process/startup/response/queue limits fail deterministically", async () =>
     maxProcesses: 1,
     maxQueuedPrompts: 1,
     maxResponseBytes: 512,
-    startTimeoutMs: 200,
+    startTimeoutMs: 2000,
   });
   const root = await create(client);
   const extra = await client.wait(
@@ -1575,7 +1578,7 @@ test("process/startup/response/queue limits fail deterministically", async () =>
   const slow = await client.wait(
     await client.request<Operation>("agent.modify", {
       agentId: root.id,
-      settings: { env: { START_DELAY: "1000" } },
+      settings: { env: { START_DELAY: "3000" } },
     }),
   );
   expect(slow.status).toBe("completed");

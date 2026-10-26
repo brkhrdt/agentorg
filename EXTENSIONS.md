@@ -59,6 +59,14 @@ namespace through both its advertised form and raw extensions in one draft (the
 client rejects ambiguous changes). Podman's specialized image propagation remains
 an explicit client-only operation, not a generic UI hook.
 
+Agent snapshot metadata is a separate explicit projection contract. Extension owners
+may provide synchronous `snapshotMetadata(value)` in `registerSettings`; it receives
+a detached namespace value and must return intentionally public JSON facts (for
+example configured directory grants or selected skill IDs), never raw credentials or
+opaque settings. Core validates the returned data and reports a namespace as
+unavailable when no projector exists. This is descriptive configured metadata, not
+a grant/effective-permission decision. UI `sensitive` hints do not authorize export.
+
 ## Server-wide public settings
 
 `registerSettings` above remains **per-agent** only. The additive

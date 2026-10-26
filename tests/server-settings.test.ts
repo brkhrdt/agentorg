@@ -45,7 +45,7 @@ test("core descriptors, shared reads, safe validation and client-only authorizat
     expect(catalog.groups[0].values).toEqual(defaults);
     const agent = { kind: "agent", id: "unprivileged" } as const;
     for (const method of ["list", "get", "update"]) await expect(org.request(`organization.settings.${method}`, {}, agent)).rejects.toMatchObject({ code: "FORBIDDEN" });
-    expect((await org.request("organization.snapshot", {}, agent) as any).capabilities.serverSettings).toBeUndefined();
+    await expect(org.request("organization.snapshot", {}, agent)).rejects.toMatchObject({ code: "NOT_FOUND" });
     for (const patch of [{ maxDepth: 0 }, { maxDepth: 1.1 }, { maxDepth: Number.MAX_SAFE_INTEGER + 1 }, { maxResponseBytes: 255 }, { maxPendingCompletionOperations: 0 }, { secret: "never save" }]) {
       await expect(update(org, 0, patch)).rejects.toMatchObject({ code: "INVALID_PARAMS" });
     }

@@ -12,7 +12,7 @@ import {
 import { dirname, resolve, join } from "node:path";
 import { z } from "zod";
 import { Organization, type AuthenticatedAgentContext } from "./organization.ts";
-import { JsonLines } from "./jsonl.ts";
+import { CLIENT_MAX_RESPONSE_LINE_BYTES, JsonLines } from "./jsonl.ts";
 import {
   ApiError,
   errorShape,
@@ -21,6 +21,10 @@ import {
   type ServerEvent,
 } from "./types.ts";
 import type { ServerPlugin } from "./plugin.ts";
+
+export function responseRecordByteLength(id: string | number | null, result: unknown): number {
+  return Buffer.byteLength(JSON.stringify({ kind: "response", id, ok: true, result }));
+}
 
 const requestSchema = z
   .object({
@@ -219,7 +223,16 @@ export class OrganizationServer {
         if (request.token) {
           const authenticated = this.organization.authenticatedAgentForToken(request.token);
           caller = authenticated.caller;
-          authenticatedAgent = authenticated.context;
+          authenticatedAgent = {
+            ...authenticated.context,
+            responsePreflight: (snapshotResult, mcpResponse) => {
+              const result = mcpResponse ? { content: [{ type: "text", text: JSON.stringify(snapshotResult) }] } : snapshotResult;
+              const recordBytes = responseRecordByteLength(id, result);
+              const lineBytes = recordBytes + 1;
+              if (Buffer.byteLength(JSON.stringify(result)) > this.organization.limits.maxResponseBytes || recordBytes > CLIENT_MAX_RESPONSE_LINE_BYTES || lineBytes > this.organization.limits.maxLineBytes || socket.writableLength + lineBytes > this.organization.limits.maxClientBufferBytes)
+                throw new ApiError("LIMIT", "Snapshot response exceeds transport limits");
+            },
+          };
           eventCaller = caller;
           internal = true;
         } else caller = eventCaller;

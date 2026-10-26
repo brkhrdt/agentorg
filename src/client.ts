@@ -1,5 +1,5 @@
 import { createConnection, type Socket } from "node:net";
-import { JsonLines } from "./jsonl.ts";
+import { CLIENT_MAX_RESPONSE_LINE_BYTES, JsonLines } from "./jsonl.ts";
 import type { EventRendering } from "./rendering.ts";
 import {
   ApiError,
@@ -25,7 +25,7 @@ export class OrganizationClient {
     private token?: string,
   ) {
     this.socket = createConnection(socketPath);
-    const lines = new JsonLines(16 * 1024 * 1024, (line) => {
+    const lines = new JsonLines(CLIENT_MAX_RESPONSE_LINE_BYTES, (line) => {
       const record = JSON.parse(line);
       if (record.kind === "event") {
         for (const listener of this.listeners) {

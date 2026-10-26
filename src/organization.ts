@@ -1,8 +1,9 @@
-import { resolve, join } from "node:path";
-import { mkdir } from "node:fs/promises";
+import { resolve, join, relative, isAbsolute, dirname, basename } from "node:path";
+import { mkdir, realpath, lstat, open, rename, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isDeepStrictEqual } from "node:util";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type * as acp from "@agentclientprotocol/sdk";
 import { Store } from "./store.ts";
@@ -60,10 +61,13 @@ interface Runtime {
   queue: Operation[];
   active?: ActivePrompt;
   startRetry?: ReturnType<typeof setTimeout>;
+  executionEnvironment?: LaunchContext["executionEnvironment"];
 }
 export interface AuthenticatedAgentContext {
   generation: string;
   sessionId: string;
+  responsePreflight?: (result: unknown, mcpResponse: boolean) => void;
+  mcpResponse?: boolean;
 }
 interface Permission {
   agentId: string;
@@ -77,6 +81,41 @@ interface CompletionOutcomeHeadline {
   name: string | null;
   status: string;
   resultAvailable: boolean;
+}
+function publicJson(value: unknown, depth = 0, budget = { nodes: 0, bytes: 0, maxBytes: 16 * 1024 * 1024 }, ancestors = new Set<object>()): unknown {
+  if (++budget.nodes > 10_000 || depth > 32) throw new ApiError("METADATA_INVALID", "Snapshot metadata exceeds structural limits");
+  if (typeof value === "string") {
+    budget.bytes += Buffer.byteLength(value, "utf8");
+    if (budget.bytes > budget.maxBytes) throw new ApiError("LIMIT", "Snapshot metadata exceeds report size limit");
+    return value;
+  }
+  if (value === null || typeof value === "boolean") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value !== "object") throw new ApiError("METADATA_INVALID", "Snapshot metadata must be finite JSON data");
+  if (ancestors.has(value)) throw new ApiError("METADATA_INVALID", "Snapshot metadata must not contain cycles");
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      const copy: unknown[] = [];
+      for (let i = 0; i < value.length; i++) {
+        const descriptor = Object.getOwnPropertyDescriptor(value, String(i));
+        if (!descriptor || !("value" in descriptor)) throw new ApiError("METADATA_INVALID", "Snapshot metadata arrays must be dense data arrays");
+        copy.push(publicJson(descriptor.value, depth + 1, budget, ancestors));
+      }
+      for (const key of Reflect.ownKeys(value)) if (key !== "length" && (typeof key !== "string" || !/^(0|[1-9][0-9]*)$/.test(key))) throw new ApiError("METADATA_INVALID", "Snapshot metadata arrays cannot have extra properties");
+      return copy;
+    }
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) throw new ApiError("METADATA_INVALID", "Snapshot metadata must use plain objects");
+    const copy: Record<string, unknown> = Object.create(null);
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key !== "string") throw new ApiError("METADATA_INVALID", "Snapshot metadata must use string keys");
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !("value" in descriptor)) throw new ApiError("METADATA_INVALID", "Snapshot metadata must not contain accessors");
+      copy[key] = publicJson(descriptor.value, depth + 1, budget, ancestors);
+    }
+    return copy;
+  } finally { ancestors.delete(value); }
 }
 function completionHeadline(outcomes: CompletionOutcomeHeadline[]): string {
   const targetNames = new Map<string, string>();
@@ -926,6 +965,81 @@ export class Organization implements PluginHost {
         });
       }
       case "organization.snapshot": {
+        if (caller.kind === "agent") {
+          const p = z.object({ path: z.string().min(1).max(4096).refine(value => !!value.trim() && !value.includes("\0"), "Invalid path").optional(), includeTerminalOperations: z.boolean().optional() }).strict().parse(params);
+          const self = this.agents.get(caller.id);
+          if (!self || self.removedAt !== null) throw new ApiError("NOT_FOUND", "Caller record not found");
+          const selected = new Map<string, AgentRecord>();
+          if (self.parentId) {
+            const parent = this.agents.get(self.parentId);
+            if (parent && parent.removedAt === null && parent.id !== self.id) selected.set(parent.id, structuredClone(parent));
+          }
+          for (const child of this.agents.values())
+            if (child.id !== self.id && child.parentId === self.id && child.removedAt === null) selected.set(child.id, structuredClone(child));
+          const rows = [...selected.values()].sort((a, b) => Number(a.id === self.parentId) * -1 || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+          const parentRecord = rows.find(agent => agent.id === self.parentId);
+          const children = rows.filter(agent => agent.parentId === self.id);
+          const compact = { parent: parentRecord ? { agentId: parentRecord.id, name: parentRecord.name } : null, subagents: children.map(agent => ({ agentId: agent.id, name: agent.name })) };
+          const preflight = (response: unknown) => {
+            const raw = JSON.stringify(response);
+            if (Buffer.byteLength(raw) > this.limits.maxResponseBytes)
+              throw new ApiError("LIMIT", "Snapshot response exceeds transport limits");
+            authenticatedAgent?.responsePreflight?.(response, authenticatedAgent.mcpResponse === true);
+          };
+          preflight(compact);
+          if (p.path === undefined) return compact;
+          const settings = structuredClone(self.settings);
+          if (!settings.cwd || !this.store.cwdWasExplicit(self.id)) throw new ApiError("FORBIDDEN", "Export requires an explicitly configured caller cwd");
+          const cwd = resolve(settings.cwd);
+          const destination = resolve(cwd, p.path);
+          const rel = relative(cwd, destination);
+          if (rel === ".." || rel.startsWith(`..${process.platform === "win32" ? "\\\\" : "/"}`) || isAbsolute(rel)) throw new ApiError("FORBIDDEN", "Export destination is outside caller cwd");
+          const inside = (base: string, targetPath: string) => { const part = relative(resolve(base), resolve(targetPath)); return part === "" || (part !== ".." && !part.startsWith(`..${process.platform === "win32" ? "\\\\" : "/"}`) && !isAbsolute(part)); };
+          if (inside(this.dataDir, destination) || resolve(destination) === resolve(this.socketPath)) throw new ApiError("FORBIDDEN", "Export destination is a protected server resource");
+          if (this.runtimes.get(self.id)?.executionEnvironment === "container") throw new ApiError("UNSUPPORTED", "Sandbox export writer is unavailable");
+          const projectRecord = (a: AgentRecord) => {
+            const extensionMetadata = Object.fromEntries(Object.entries(a.settings.extensions ?? {}).map(([namespace, value]) => {
+              const projector = this.extensionSettings.get(namespace)?.snapshotMetadata;
+              if (!projector) return [namespace, { availability: "unavailable", reason: "No public metadata projector registered" }];
+              try { return [namespace, { availability: "available", metadata: publicJson(projector(structuredClone(value)), 0, { nodes: 0, bytes: 0, maxBytes: this.limits.maxSnapshotReportBytes }) }]; }
+              catch (error) { throw pluginError(namespace, error); }
+            }));
+            return { agentId: a.id, name: a.name, state: a.state, revision: a.revision, createdAt: a.createdAt, updatedAt: a.updatedAt, settings: { harness: a.settings.harness, ...(a.settings.model !== undefined && { model: a.settings.model }), ...(a.settings.provider !== undefined && { provider: a.settings.provider }), ...(a.settings.cwd !== undefined && { cwd: a.settings.cwd }) }, metadataAvailability: { userMetadata: "unavailable", directoryGrants: "unavailable unless projected by owning extension", skills: "unavailable unless projected by owning extension" }, extensions: extensionMetadata };
+          };
+          const report = { version: 1, generatedAt: now(), seq: this.store.sequence(), parent: parentRecord ? projectRecord(parentRecord) : null, subagents: children.map(projectRecord) };
+          const bytes = Buffer.from(`${JSON.stringify(report, null, 2)}\n`, "utf8");
+          if (bytes.byteLength > this.limits.maxSnapshotReportBytes) throw new ApiError("LIMIT", "Snapshot report exceeds size limit");
+          const response = { ...compact, export: { path: p.path, bytes: bytes.byteLength, agentCount: rows.length } };
+          preflight(response);
+          let temp: string | undefined;
+          try {
+            const realCwd = await realpath(cwd);
+            let cursor = realCwd;
+            const relParts = relative(realCwd, destination).split(/[\\\\/]/).filter(Boolean);
+            for (const part of relParts.slice(0, -1)) {
+              cursor = join(cursor, part);
+              const st = await lstat(cursor);
+              if (st.isSymbolicLink() || !st.isDirectory()) throw new ApiError("INVALID_PATH", "Unsafe export path");
+            }
+            const parentDir = await realpath(dirname(destination));
+            if (!inside(realCwd, parentDir)) throw new ApiError("FORBIDDEN", "Export destination is outside caller cwd");
+            const protectedData = await realpath(this.dataDir);
+            const canonicalDestination = join(parentDir, basename(destination));
+            if (inside(protectedData, parentDir) || canonicalDestination === resolve(this.socketPath)) throw new ApiError("FORBIDDEN", "Export destination is a protected server resource");
+            try { const existing = await lstat(destination); if (!existing.isFile() || existing.isSymbolicLink()) throw new ApiError("INVALID_PATH", "Destination must be a regular file"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+            temp = join(parentDir, `.${basename(destination)}.${randomUUID()}.tmp`);
+            const handle = await open(temp, "wx", 0o600);
+            try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
+            try { const existing = await lstat(destination); if (!existing.isFile() || existing.isSymbolicLink()) throw new ApiError("INVALID_PATH", "Destination must be a regular file"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+            await rename(temp, destination); temp = undefined;
+          } catch (error) {
+            if (temp) await unlink(temp).catch(() => {});
+            if (error instanceof ApiError) throw error;
+            if (["ENOENT", "ENOTDIR", "ELOOP"].includes((error as NodeJS.ErrnoException).code ?? "")) throw new ApiError("INVALID_PATH", "Export path is unavailable or unsafe");
+            throw new ApiError("EXPORT_IO", "Snapshot export failed");
+          }
+          return response;
+        }
         const { includeTerminalOperations } = z.object({
           includeTerminalOperations: z.boolean().default(true),
         }).strict().parse(params);
@@ -934,10 +1048,10 @@ export class Organization implements PluginHost {
           agents: [...this.agents.values()].map((a) => structuredClone(a)),
           capabilities: {
             cwd: this.cwd,
-            ...(caller.kind !== "agent" && { serverSettings: {
+            serverSettings: {
               version: 1, groups: this.serverSettingsRegistry.descriptors(),
               endpoints: { list: "organization.settings.list", get: "organization.settings.get", update: "organization.settings.update" },
-            }, rendering: { version: 1, catalog: "events.renderers" }, loadedPlugins: [...this.loadedPlugins] }),
+            }, rendering: { version: 1, catalog: "events.renderers" }, loadedPlugins: [...this.loadedPlugins],
             pathCompletion: true,
             harnesses: [...this.harnesses.keys()].sort(),
             modelDiscovery: [...this.harnesses.values()].filter(h => h.listModels).map(h => h.name).sort(),
@@ -1067,6 +1181,7 @@ export class Organization implements PluginHost {
           try {
             await this.applyMutation(transaction.changes);
             changes = this.commitSettings(a, transaction.related);
+            this.store.setCwdExplicit(a.id, p.settings.cwd !== undefined);
           } catch (error) {
             await this.rollbackMutation(transaction.changes);
             throw error;
@@ -1130,6 +1245,7 @@ export class Organization implements PluginHost {
               a.sessionNumber++;
             }
             changes = this.commitSettings(a, transaction.related);
+            if (p.settings?.cwd !== undefined) this.store.setCwdExplicit(a.id, true);
           } catch (error) {
             await this.rollbackMutation(transaction.changes);
             if (launchChanged && active) {
@@ -1373,8 +1489,9 @@ export class Organization implements PluginHost {
         const tool = this.tools.get(p.name);
         if (!tool) throw new ApiError("NOT_FOUND", "Unknown MCP tool");
         try {
+          const toolAgentContext = authenticatedAgent ? { ...authenticatedAgent, mcpResponse: true } : undefined;
           const result = bounded(
-            await tool.execute(p.arguments, caller, this, authenticatedAgent),
+            await tool.execute(p.arguments, caller, this, toolAgentContext),
             this.limits.maxResponseBytes,
           );
           return {
@@ -1496,7 +1613,7 @@ export class Organization implements PluginHost {
             void this.serialize(() => this.crashed(a.id, generation, message));
         },
       );
-      rt = { process: proc, generation, token, queue: [] };
+      rt = { process: proc, generation, token, queue: [], executionEnvironment: context.executionEnvironment };
       this.runtimes.set(a.id, rt);
       this.tokens.set(token, a.id);
       await deadline(
@@ -1842,8 +1959,8 @@ export class Organization implements PluginHost {
     add(
       "snapshot_organization",
       "organization.snapshot",
-      "List full-tree agent records (including other branches); this visibility does not grant prompt authority. Operations remain scoped by existing authorization. includeTerminalOperations=false omits terminal operations; completion metadata remains separately scoped through get_completion.",
-      { includeTerminalOperations: { type: "boolean" } },
+      "List the caller's non-removed parent (if any) and direct children only, excluding the caller. Stopped and failed records remain visible. No parentId or operations are returned. Optionally write a richer JSON metadata report inside the caller's configured cwd; ~ is not expanded. includeTerminalOperations is deprecated and has no effect.",
+      { path: { type: "string", minLength: 1, maxLength: 4096, description: "Optional report destination, relative to caller cwd or absolute within it." }, includeTerminalOperations: { type: "boolean", description: "Deprecated compatibility flag; does not include operations." } },
     );
     for (const [action, toolName] of [
       ["stop", "stop_subagent"],

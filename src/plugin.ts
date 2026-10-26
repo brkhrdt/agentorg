@@ -107,6 +107,8 @@ export interface ExtensionSettings {
   validate(value: unknown): unknown;
   /** Identity of launch resources; defaults to the whole value. */
   launchKey?(value: unknown): unknown;
+  /** Synchronously project detached, intentionally public per-agent metadata for snapshot exports. Return bounded JSON only; omit secrets and raw settings. */
+  snapshotMetadata?(value: unknown): unknown;
   /** Runs only over persisted records, before startup reconciliation. */
   migrate?(settings: Record<string, unknown>): Record<string, unknown>;
 }

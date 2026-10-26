@@ -1,5 +1,7 @@
 import { StringDecoder } from "node:string_decoder";
 
+export const CLIENT_MAX_RESPONSE_LINE_BYTES = 16 * 1024 * 1024;
+
 /** LF-only framing, including split UTF-8 characters and literal Unicode separators. */
 export class JsonLines {
   private decoder = new StringDecoder("utf8");

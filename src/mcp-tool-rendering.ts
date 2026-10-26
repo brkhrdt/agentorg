@@ -5,7 +5,7 @@ import type { ServerEvent } from "./types.ts";
 export const MCP_TOOL_NAMES = ["create_subagent", "prompt_subagent", "prompt_parent", "get_subagent", "snapshot_organization", "stop_subagent", "restart_subagent", "restart_subagent_subtree", "replace_subagent_session", "remove_subagent", "modify_subagent", "get_completion", "get_operation", "wait_operation", "cancel_operation"] as const;
 export type McpToolName = typeof MCP_TOOL_NAMES[number];
 const labels: Record<McpToolName, string> = {
-  create_subagent: "Create child", prompt_subagent: "Prompt child", prompt_parent: "Prompt parent", get_subagent: "Inspect agent", snapshot_organization: "Snapshot organization",
+  create_subagent: "Create child", prompt_subagent: "Prompt child", prompt_parent: "Prompt parent", get_subagent: "Inspect agent", snapshot_organization: "List adjacent agents",
   stop_subagent: "Stop agent", restart_subagent: "Restart agent", restart_subagent_subtree: "Restart subtree", replace_subagent_session: "Replace session",
   remove_subagent: "Remove subtree", modify_subagent: "Modify agent", get_completion: "Inspect completion", get_operation: "Inspect operation", wait_operation: "Wait for operation", cancel_operation: "Cancel operation",
 };
@@ -84,8 +84,12 @@ function domainDetails(tool: McpToolName, value: unknown, context: Readonly<Rend
     }
     if (cursor !== undefined && cursor !== null) details.push(`Next cursor: ${oneLine(cursor)}`);
   } else if (tool === "snapshot_organization") {
-    if (Array.isArray(d.agents)) details.push(`Agents: ${d.agents.length}`);
+    if (d.parent !== undefined) details.push(`Parent: ${d.parent ? `${oneLine(record(d.parent).name ?? record(d.parent).agentId)} (${oneLine(record(d.parent).agentId ?? "ID unavailable")})` : "none"}`);
+    if (Array.isArray(d.subagents)) details.push(`Direct subagents: ${d.subagents.length}`);
+    if (Array.isArray(d.agents)) details.push(`Adjacent agents: ${d.agents.length}`);
     if (Array.isArray(d.operations)) details.push(`Operations: ${d.operations.length}`);
+    const receipt = record(d.export);
+    if (typeof receipt.path === "string") details.push(`Exported ${oneLine(receipt.path)} (${oneLine(receipt.bytes)} bytes)`);
     if (d.seq !== undefined) details.push(`Sequence: ${oneLine(d.seq)}`);
   } else {
     const operationId = typeof d.operationId === "string" ? d.operationId : typeof d.id === "string" && (typeof d.status === "string" || typeof d.type === "string") ? d.id : undefined;
@@ -114,7 +118,7 @@ function subject(tool: McpToolName, input: Record<string, any>, context: Readonl
     const target = `@${name}`;
     return { title: `${target} ${typeof input.text === "string" && input.text.trim() ? oneLine(input.text) : "[prompt unavailable]"}`, target };
   }
-  const args = tool === "snapshot_organization" ? input.includeTerminalOperations === false ? "active operations" : "all operations"
+  const args = tool === "snapshot_organization" ? typeof input.path === "string" ? `metadata export · ${oneLine(input.path)}` : "adjacent agents"
     : tool === "create_subagent" ? [input.name, record(input.settings).harness, record(input.settings).model].filter(value => typeof value === "string" && value).map(oneLine).join(" · ") || "child request"
     : tool === "get_completion" ? `batch ${idFor(input, "batchId", "[batch unavailable]")}`
     : ["get_operation", "wait_operation", "cancel_operation"].includes(tool) ? [idFor(input, "operationId", "[operation unavailable]"), tool === "get_operation" && context.targetName ? oneLine(context.targetName) : undefined].filter(Boolean).join(" · ")
@@ -145,14 +149,14 @@ export function renderMcpTool(tool: McpToolName, event: Readonly<ServerEvent>, c
   return { summary: heading, extended: `${heading}\n${literalMarkdown(priority)}`, full, updateMode: "semantic", extendedLayout: "header-detail", toolSymbol: "∴", ...(target && { toolTarget: target }), ...(operationAgentTargets && { toolTargets: operationAgentTargets }), ...(["prompt_subagent", "prompt_parent"].includes(tool) && { toolPrompt: typeof args.text === "string" ? args.text : "" }), invocationError }
 }
 const exampleInputs: Record<McpToolName, unknown> = {
-  create_subagent:{name:"reviewer",settings:{harness:"pi",model:"provider/model"}}, prompt_subagent:{agentId:"child-1",text:"Review the implementation",queue:true}, prompt_parent:{text:"Status update",queue:true}, get_subagent:{agentId:"child-1"}, snapshot_organization:{includeTerminalOperations:false}, stop_subagent:{agentId:"child-1"}, restart_subagent:{agentId:"child-1"}, restart_subagent_subtree:{agentId:"child-1"}, replace_subagent_session:{agentId:"child-1"}, remove_subagent:{agentId:"child-1"}, modify_subagent:{agentId:"child-1",expectedRevision:3,settings:{model:"provider/model"}}, get_completion:{batchId:"operation-1",after:0,limit:20}, get_operation:{operationId:"operation-1",resultOnly:true}, wait_operation:{operationId:"operation-1",waitMs:1000}, cancel_operation:{operationId:"operation-1"},
+  create_subagent:{name:"reviewer",settings:{harness:"pi",model:"provider/model"}}, prompt_subagent:{agentId:"child-1",text:"Review the implementation",queue:true}, prompt_parent:{text:"Status update",queue:true}, get_subagent:{agentId:"child-1"}, snapshot_organization:{path:"reports/agents.json"}, stop_subagent:{agentId:"child-1"}, restart_subagent:{agentId:"child-1"}, restart_subagent_subtree:{agentId:"child-1"}, replace_subagent_session:{agentId:"child-1"}, remove_subagent:{agentId:"child-1"}, modify_subagent:{agentId:"child-1",expectedRevision:3,settings:{model:"provider/model"}}, get_completion:{batchId:"operation-1",after:0,limit:20}, get_operation:{operationId:"operation-1",resultOnly:true}, wait_operation:{operationId:"operation-1",waitMs:1000}, cancel_operation:{operationId:"operation-1"},
 };
 const exampleDomains: Record<McpToolName, { update: unknown; result: unknown }> = {
   create_subagent:{update:{id:"operation-1",type:"agent.create",status:"running",agentId:"parent-1"},result:{id:"operation-1",type:"agent.create",status:"completed",agentId:"parent-1",result:{id:"child-1",name:"reviewer"}}},
   prompt_subagent:{update:{id:"operation-2",type:"agent.prompt",status:"running",agentId:"child-1"},result:{id:"operation-2",type:"agent.prompt",status:"queued",agentId:"child-1"}},
   prompt_parent:{update:{id:"operation-up",type:"agent.prompt",status:"running",agentId:"parent-1"},result:{id:"operation-up",type:"agent.prompt",status:"queued",agentId:"parent-1"}},
   get_subagent:{update:{id:"child-1",name:"reviewer",state:"starting",revision:3,sessionNumber:1},result:{id:"child-1",name:"reviewer",state:"running",revision:3,sessionNumber:1,settings:{harness:"pi",model:"provider/model"}}},
-  snapshot_organization:{update:{seq:41,agents:[{id:"parent-1"},{id:"child-1"}],operations:[{id:"operation-1",status:"running"}]},result:{seq:42,agents:[{id:"parent-1"},{id:"child-1"}],operations:[{id:"operation-1",status:"running"}]}},
+  snapshot_organization:{update:{parent:null,subagents:[{agentId:"child-1",name:"reviewer"}]},result:{parent:null,subagents:[{agentId:"child-1",name:"reviewer"}],export:{path:"reports/agents.json",bytes:512,agentCount:1}}},
   stop_subagent:{update:{id:"operation-3",status:"running",agentId:"child-1"},result:{id:"operation-3",status:"completed",agentId:"child-1",result:{state:"stopped"}}},
   restart_subagent:{update:{id:"operation-4",status:"running",agentId:"child-1"},result:{id:"operation-4",status:"completed",agentId:"child-1",result:{state:"running",generation:"generation-2"}}},
   restart_subagent_subtree:{update:{id:"operation-5",status:"running",agentId:"child-1"},result:{id:"operation-5",status:"completed",agentId:"child-1"}},
