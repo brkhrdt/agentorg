@@ -24,6 +24,10 @@ export type AgentState =
   | "recovering"
   | "stopped"
   | "failed";
+export interface AgentUsageTotals {
+  self: Record<string, number>;
+  reporting: { reports: number; latestAt: string | null; metrics: Record<string, { observations: number; contributors: number }> };
+}
 export interface AgentRecord {
   id: string;
   parentId: string | null;
@@ -35,6 +39,8 @@ export interface AgentRecord {
   generation: string | null;
   sessionId: string;
   sessionNumber: number;
+  /** Core-maintained absolute usage totals; not part of optimistic revisioning. */
+  usage?: AgentUsageTotals;
   removedAt: string | null;
   createdAt: string;
   updatedAt: string;

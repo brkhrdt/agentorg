@@ -12,6 +12,7 @@ import { ServerSettingsRegistry, coreSettings, type ServerSettingsDefinition } f
 import { workerArgs } from "./runtime.ts";
 import { completePath } from "./path-completion.ts";
 import { AgentProcess, deadline } from "./process.ts";
+import { metricIdSchema, type UsageMetricDefinition, type UsageNotification, type UsageQuery, type UsageQueryResult } from "./usage.ts";
 import { pluginError, pluginHost, pluginTimeout } from "./plugin-host.ts";
 import type {
   HarnessPlugin,
@@ -182,6 +183,7 @@ export class Organization implements PluginHost {
   > = [];
   private extensionSettings = new Map<string, ExtensionSettings>();
   private capabilities: Record<string, unknown> = {};
+  private usageMetricCatalog = new Map<string, UsageMetricDefinition>();
   private mutationHooks: Array<(context: MutationContext) => MutationChange | void | Promise<MutationChange | void>> = [];
   private initializeHooks: Array<(agents: Readonly<AgentRecord>[]) => void | Promise<void>> = [];
   private contextHooks: Array<(context: LaunchContext) => void | Promise<void>> = [];
@@ -255,6 +257,28 @@ export class Organization implements PluginHost {
   registerCapability(namespace: string, value: unknown) {
     if (Object.hasOwn(this.capabilities, namespace)) throw new Error(`Duplicate capability ${namespace}`);
     Object.defineProperty(this.capabilities, namespace, { value: structuredClone(value), enumerable: true });
+  }
+  registerUsageMetric(definition: UsageMetricDefinition) {
+    this.addUsageMetrics([definition]);
+  }
+  private addUsageMetrics(definitions: UsageMetricDefinition[]) {
+    const parsed = z.array(z.object({ id: metricIdSchema, title: z.string().min(1).max(128), unit: z.string().min(1).max(64), description: z.string().max(1024).optional() }).strict()).max(256).parse(definitions);
+    const within = new Map<string, UsageMetricDefinition>();
+    for (const definition of parsed) {
+      const previous = within.get(definition.id) ?? this.usageMetricCatalog.get(definition.id);
+      if (previous && !isDeepStrictEqual(previous, definition)) throw new Error(`Conflicting usage metric definition ${definition.id}`);
+      within.set(definition.id, definition);
+    }
+    for (const [id, definition] of within) this.usageMetricCatalog.set(id, structuredClone(definition));
+  }
+  queryUsage(query: UsageQuery, caller: Caller): UsageQueryResult {
+    const result = this.usageQuery(query, caller);
+    this.assertUsageResultBounded(result);
+    return result;
+  }
+  private assertUsageResultBounded(result: UsageQueryResult) {
+    if (Buffer.byteLength(JSON.stringify(result)) > this.limits.maxResponseBytes)
+      throw new ApiError("LIMIT", "Usage response exceeds transport limits; filter metricIds");
   }
   beforeMutation(handler: (context: MutationContext) => MutationChange | void | Promise<MutationChange | void>) { this.mutationHooks.push(handler); }
   onInitialize(handler: (agents: Readonly<AgentRecord>[]) => void | Promise<void>) { this.initializeHooks.push(handler); }
@@ -331,6 +355,7 @@ export class Organization implements PluginHost {
   registerHarness(harness: HarnessPlugin) {
     if (this.harnesses.has(harness.name))
       throw new Error(`Duplicate harness ${harness.name}`);
+    this.addUsageMetrics(harness.usageMetrics ?? []);
     this.renderers.registerHarness(harness.name, harness.renderers ?? [], harness.toolAliases ?? {});
     this.harnesses.set(harness.name, harness);
   }
@@ -562,6 +587,97 @@ export class Organization implements PluginHost {
       a = a.parentId ? this.agents.get(a.parentId) : undefined;
     }
     return false;
+  }
+  private usageQuery(query: UsageQuery, caller: Caller): UsageQueryResult {
+    const parsed = z.object({ agentId: z.string().min(1).optional(), scope: z.enum(["self", "subtree"]).default("subtree"), metricIds: z.array(metricIdSchema).max(256).optional() }).strict().refine(value => !value.metricIds || new Set(value.metricIds).size === value.metricIds.length, "metricIds must be unique").parse(query);
+    const agentId = parsed.agentId ?? (caller.kind === "agent" ? caller.id : undefined);
+    if (!agentId) throw new ApiError("INVALID_PARAMS", "agentId is required for client usage queries");
+    if (!this.agents.has(agentId)) throw new ApiError("NOT_FOUND", "Usage query agent not found");
+    this.authorize(caller, agentId);
+    const selected = [...this.agents.values()].filter(agent => parsed.scope === "self" ? agent.id === agentId : this.isDescendant(agent.id, agentId));
+    const usageByAgent = this.store.usageTotals(selected.map(agent => agent.id));
+    const metrics = new Map<string, { total: number; observations: number; contributors: number }>();
+    let reports = 0, latestAt: string | null = null;
+    for (const agent of selected) {
+      const usage = usageByAgent[agent.id];
+      if (!usage) continue;
+      reports += usage.reports;
+      if (usage.latestAt !== null && (latestAt === null || usage.latestAt.localeCompare(latestAt) > 0)) latestAt = usage.latestAt;
+      for (const [id, value] of Object.entries(usage.metrics)) {
+        if (parsed.metricIds && !parsed.metricIds.includes(id)) continue;
+        const entry = metrics.get(id) ?? { total: 0, observations: 0, contributors: 0 };
+        const total = entry.total + value.total;
+        if (!Number.isFinite(total) || ((id.startsWith("token.") || id.startsWith("tokens.")) && !Number.isSafeInteger(total))) throw new ApiError("LIMIT", `Usage aggregate overflow for ${id}`);
+        entry.total = total; entry.observations += value.observations; entry.contributors++; metrics.set(id, entry);
+      }
+    }
+    const totals: UsageQueryResult["metrics"] = Object.create(null);
+    const metricReporting: UsageQueryResult["reporting"]["metrics"] = Object.create(null);
+    for (const [id, entry] of [...metrics].sort(([a], [b]) => a.localeCompare(b))) {
+      totals[id] = entry.total;
+      metricReporting[id] = { observations: entry.observations, contributors: entry.contributors };
+    }
+    const catalogIds = new Set([...this.usageMetricCatalog.keys(), ...Object.keys(totals)]);
+    const catalog = [...catalogIds].filter(id => !parsed.metricIds || parsed.metricIds.includes(id)).sort().map(id =>
+      this.usageMetricCatalog.get(id) ?? { id, title: id, unit: "unknown" },
+    );
+    const result: UsageQueryResult = {
+      version: 1, agentId, scope: parsed.scope, metrics: totals,
+      reporting: { reports, agentCount: selected.length, latestAt, includesRemoved: true, metrics: metricReporting }, catalog,
+    };
+    return result;
+  }
+  private usageSnapshot(agentId: string, caller: Caller) {
+    const self = this.usageQuery({ agentId, scope: "self" }, caller);
+    const subtree = this.usageQuery({ agentId, scope: "subtree" }, caller);
+    return { self: self.metrics, subtree: subtree.metrics, reporting: { self: self.reporting, subtree: subtree.reporting } };
+  }
+  /** Compute all snapshot subtree totals in one bottom-up pass over durable self totals. */
+  private usageSnapshots(agents: AgentRecord[]) {
+    type Totals = { reports: number; agentCount: number; latestAt: string | null; metrics: Map<string, { total: number; observations: number; contributors: number }> };
+    const ids = agents.map(agent => agent.id), self = this.store.usageTotals(ids);
+    const subtree = new Map<string, Totals>();
+    const empty = (agentCount: number): Totals => ({ reports: 0, agentCount, latestAt: null, metrics: new Map() });
+    const fromUsage = (usage: ReturnType<Store["usageTotals"]>[string] | undefined, agentCount: number): Totals => {
+      const result = empty(agentCount);
+      if (!usage) return result;
+      result.reports = usage.reports; result.latestAt = usage.latestAt;
+      for (const [id, value] of Object.entries(usage.metrics)) result.metrics.set(id, { total: value.total, observations: value.observations, contributors: value.observations > 0 ? 1 : 0 });
+      return result;
+    };
+    for (const agent of agents) subtree.set(agent.id, fromUsage(self[agent.id], 1));
+    const depth = (agent: AgentRecord) => { let value = 0, current: AgentRecord | undefined = agent; while (current?.parentId) { value++; current = this.agents.get(current.parentId); } return value; };
+    for (const child of [...agents].sort((a, b) => depth(b) - depth(a))) {
+      if (!child.parentId) continue;
+      const parent = subtree.get(child.parentId), value = subtree.get(child.id);
+      if (!parent || !value) continue;
+      parent.reports += value.reports; parent.agentCount += value.agentCount;
+      if (value.latestAt && (!parent.latestAt || value.latestAt.localeCompare(parent.latestAt) > 0)) parent.latestAt = value.latestAt;
+      for (const [id, source] of value.metrics) {
+        const target = parent.metrics.get(id) ?? { total: 0, observations: 0, contributors: 0 };
+        target.total += source.total; target.observations += source.observations; target.contributors += source.contributors;
+        if (!Number.isFinite(target.total) || ((id.startsWith("token.") || id.startsWith("tokens.")) && !Number.isSafeInteger(target.total))) throw new ApiError("LIMIT", `Usage aggregate overflow for ${id}`);
+        parent.metrics.set(id, target);
+      }
+    }
+    const projectMetrics = (totals: Totals) => Object.fromEntries([...totals.metrics].sort(([a], [b]) => a.localeCompare(b)).map(([id, value]) => [id, value.total]));
+    const reporting = (totals: Totals) => ({ reports: totals.reports, agentCount: totals.agentCount, latestAt: totals.latestAt, includesRemoved: true as const, metrics: Object.fromEntries([...totals.metrics].sort(([a], [b]) => a.localeCompare(b)).map(([id, value]) => [id, { observations: value.observations, contributors: value.contributors }])) });
+    return new Map(agents.map(agent => {
+      const selfUsage = fromUsage(self[agent.id], 1), treeUsage = subtree.get(agent.id)!;
+      return [agent.id, { self: projectMetrics(selfUsage), subtree: projectMetrics(treeUsage), reporting: { self: reporting(selfUsage), subtree: reporting(treeUsage) } }];
+    }));
+  }
+  private receiveUsage(agentId: string, generation: string, input: UsageNotification | null) {
+    if (!input) return;
+    const runtime = this.runtimes.get(agentId);
+    if (!runtime || runtime.generation !== generation || runtime.process.sessionId !== input.sessionId) return;
+    const record = { ...input, agentId, generation, recordedAt: now() };
+    const result = this.store.recordUsage(record, this.limits.maxEvents);
+    if (result.inserted && result.agentUsage && result.event) {
+      const agent = this.agents.get(agentId);
+      if (agent) agent.usage = result.agentUsage;
+      this.publishEvent(result.event);
+    }
   }
   private authorize(caller: Caller, id: string, manage = false) {
     if (caller.kind === "agent" && !this.isDescendant(id, caller.id, !manage))
@@ -940,6 +1056,10 @@ export class Organization implements PluginHost {
         z.object({}).strict().parse(params);
         return { version: 1, renderers: this.renderers.catalog() };
       }
+      case "usage.get": {
+        const p = z.object({ agentId: z.string().min(1).optional(), scope: z.enum(["self", "subtree"]).default("subtree"), metricIds: z.array(metricIdSchema).max(256).optional() }).strict().parse(params);
+        return this.queryUsage(p, caller);
+      }
       case "organization.settings.list": {
         if (caller.kind === "agent") throw new ApiError("FORBIDDEN", "Server settings are client-only");
         z.object({}).strict().parse(params);
@@ -1046,9 +1166,15 @@ export class Organization implements PluginHost {
         const { includeTerminalOperations } = z.object({
           includeTerminalOperations: z.boolean().default(true),
         }).strict().parse(params);
+        const snapshotAgents = [...this.agents.values()];
+        const snapshotUsage = this.usageSnapshots(snapshotAgents);
         return {
           seq: this.store.sequence(),
-          agents: [...this.agents.values()].map((a) => structuredClone(a)),
+          agents: snapshotAgents.map((a) => {
+            const record = structuredClone(a);
+            delete record.usage;
+            return { ...record, usage: snapshotUsage.get(a.id)! };
+          }),
           capabilities: {
             cwd: this.cwd,
             serverSettings: {
@@ -1058,6 +1184,7 @@ export class Organization implements PluginHost {
             pathCompletion: true,
             harnesses: [...this.harnesses.keys()].sort(),
             modelDiscovery: [...this.harnesses.values()].filter(h => h.listModels).map(h => h.name).sort(),
+            usage: { version: 1, notification: "_agentorg/usage", query: "usage.get", scopes: ["self", "subtree"], metrics: [...this.usageMetricCatalog.values()].sort((a, b) => a.id.localeCompare(b.id)) },
             plugins: structuredClone(this.capabilities),
             settingsEditors: Object.fromEntries([...this.extensionSettings].filter(([, extension]) => extension.ui).map(([namespace, extension]) => [namespace, structuredClone(extension.ui)])),
           },
@@ -1123,7 +1250,7 @@ export class Organization implements PluginHost {
       case "agent.get": {
         const { agentId } = target.parse(params);
         this.authorize(caller, agentId);
-        return structuredClone(this.agent(agentId, false));
+        return { ...structuredClone(this.agent(agentId, false)), usage: this.usageSnapshot(agentId, caller) };
       }
       case "agent.create": {
         const p = z
@@ -1612,11 +1739,7 @@ export class Organization implements PluginHost {
         },
         (notification) => {
           if (!this.closing)
-            void this.serialize(() => {
-              const current = this.runtimes.get(a.id);
-              if (current?.generation === generation)
-                this.emit("agent.update", notification, a.id, generation);
-            });
+            void this.serialize(() => this.receiveUsage(a.id, generation, notification));
         },
         (request) => this.permission(a.id, generation, request),
         (message) => {
@@ -1966,6 +2089,12 @@ export class Organization implements PluginHost {
       "Inspect yourself or a descendant, including historical records.",
       { agentId: id },
       ["agentId"],
+    );
+    add(
+      "usage_get",
+      "usage.get",
+      "Query aggregate usage for yourself or an authorized descendant. Subtree totals include removed agents; metrics report totals, observation counts, and contributing-agent coverage.",
+      { agentId: id, scope: { type: "string", enum: ["self", "subtree"] }, metricIds: { type: "array", maxItems: 256, items: id } },
     );
     add(
       "snapshot_organization",

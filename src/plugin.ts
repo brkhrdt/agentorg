@@ -2,6 +2,8 @@ import type { McpServer } from "@agentclientprotocol/sdk";
 import type { AgentRecord, Caller, ServerEvent, Settings } from "./types.ts";
 
 import type { ServerSettingsDefinition } from "./server-settings.ts";
+import type { UsageMetricDefinition, UsageQuery, UsageQueryResult } from "./usage.ts";
+export type { UsageMetricDefinition, UsageQuery, UsageQueryResult, UsageNotification } from "./usage.ts";
 export type { ServerSettingsDefinition, ServerSettingsDescriptor, ServerSettingsField, ServerSettingsView, SettingsEffect } from "./server-settings.ts";
 
 import type { EventRenderer } from "./rendering.ts";
@@ -51,6 +53,8 @@ export interface HarnessPlugin {
   renderers?: EventRenderer[];
   /** Explicit emitted tool identity to canonical identity map; no suffix guessing. */
   toolAliases?: Record<string, string> | ((canonicalTools: readonly string[]) => Record<string, string>);
+  /** Public namespaced numeric usage metrics emitted by this harness. */
+  usageMetrics?: UsageMetricDefinition[];
   /** Available models using server-side credentials/configuration; never return secrets. */
   listModels?(context: ModelDiscoveryContext): HarnessModel[] | Promise<HarnessModel[]>;
   /** Launch a stdio ACP v1 agent; non-ACP harnesses must supply an adapter. */
@@ -122,6 +126,10 @@ export interface PluginHost {
   /** Effective public configuration, including persisted overrides. Returns a detached copy. */
   serverSettings(namespace: string): Record<string, unknown>;
   registerCapability(namespace: string, value: unknown): void;
+  /** Query durable usage, enforcing the same self/subtree authorization as core requests. */
+  queryUsage(query: UsageQuery, caller: Caller): UsageQueryResult;
+  /** Advertise a public metric definition; unknown metrics remain queryable. */
+  registerUsageMetric(definition: UsageMetricDefinition): void;
   beforeMutation(handler: (context: MutationContext) => MutationChange | void | Promise<MutationChange | void>): void;
   onInitialize(handler: (agents: Readonly<AgentRecord>[]) => void | Promise<void>): void;
   prepareLaunch(handler: (context: LaunchContext) => void | Promise<void>): void;

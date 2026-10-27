@@ -103,9 +103,9 @@ test("core native-tool compatibility helpers are generic; harness plugins own st
   }
 });
 
-test("core MCP renderers cover exactly the fifteen public tools and preserve stable identity/details", () => {
+test("core MCP renderers cover exactly the public tools and preserve stable identity/details", () => {
   const registry = new RendererRegistry();
-  const names = ["create_subagent", "prompt_subagent", "prompt_parent", "get_subagent", "snapshot_organization", "stop_subagent", "restart_subagent", "restart_subagent_subtree", "replace_subagent_session", "remove_subagent", "modify_subagent", "get_completion", "get_operation", "wait_operation", "cancel_operation"];
+  const names = ["create_subagent", "prompt_subagent", "prompt_parent", "get_subagent", "usage_get", "snapshot_organization", "stop_subagent", "restart_subagent", "restart_subagent_subtree", "replace_subagent_session", "remove_subagent", "modify_subagent", "get_completion", "get_operation", "wait_operation", "cancel_operation"];
   registry.registerHarness("pi", [], canonicalTools => Object.fromEntries(canonicalTools.map(tool => [`mcp__agentorg__${tool}`, tool])));
   registry.validateRegistrations(names);
   const coreCatalog = registry.catalog().filter(r => r.id.startsWith("core.mcp-"));

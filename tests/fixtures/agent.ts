@@ -177,9 +177,24 @@ acp
     }
     if (text === "usage-notification-fixture") {
       await ctx.client.notify("_agentorg/usage", {
-        used: 321,
-        size: 4096,
-        cost: { amount: 0.0123, currency: "USD" },
+        version: 1,
+        sessionId,
+        reportId: "fixture-usage-report",
+        metrics: { "tokens.input": 0, "tokens.output": 23, "cost.usd": 0.0123, "custom.unknown_metric": 7 },
+      });
+    }
+    if (text === "usage-invalid-fixture") {
+      await ctx.client.notify("_agentorg/usage", {
+        version: 1,
+        sessionId,
+        reportId: "fixture-invalid-report",
+        metrics: { "tokens.input": 4, "tokens.output": 1.5, "tokens.negative": -1, "custom.zero": 0, "invalid": 42, "custom.missing": null },
+      });
+    }
+    if (text === "usage-empty-fixture") {
+      await ctx.client.notify("_agentorg/usage", {
+        version: 1, sessionId, reportId: "fixture-empty-report",
+        metrics: { "tokens.input": -1, invalid: 42 },
       });
     }
     if (text === "tui-parent-render-check") {

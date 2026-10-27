@@ -84,6 +84,8 @@ export function pluginHost(host: PluginHost, name: string): PluginHost {
     },
     serverSettings: namespace => host.serverSettings(namespace),
     registerCapability: (namespace, value) => host.registerCapability(namespace, value),
+    queryUsage: (query, caller) => host.queryUsage(query, caller),
+    registerUsageMetric: definition => host.registerUsageMetric(definition),
     beforeMutation: handler => host.beforeMutation(wrap(handler, mutation)),
     onInitialize: handler => host.onInitialize(wrap(handler)),
     prepareLaunch: handler => host.prepareLaunch(wrap(handler)),

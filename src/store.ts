@@ -5,6 +5,13 @@ import { ApiError, bounded, type AgentRecord, type Operation, type ServerEvent }
 import type { EventRendering } from "./rendering.ts";
 import type { ServerSettingsRecord } from "./server-settings.ts";
 import type { CompletionBatch, CompletionBatchIdentity } from "./completion-contract.ts";
+import type { UsageRecord } from "./usage.ts";
+
+interface DurableUsageTotals {
+  reports: number;
+  metrics: Record<string, { total: number; observations: number }>;
+  latestAt: string | null;
+}
 
 /** Records are durable; only bounded event and terminal-operation history is pruned. */
 export class Store {
@@ -30,6 +37,12 @@ export class Store {
         operation_id TEXT NOT NULL UNIQUE, PRIMARY KEY(parent_agent_id, parent_session_id, root_operation_id, operation_id),
         FOREIGN KEY(parent_agent_id, parent_session_id, root_operation_id) REFERENCES completion_batches(parent_agent_id, parent_session_id, root_operation_id));
       CREATE TABLE IF NOT EXISTS result_pins (operation_id TEXT PRIMARY KEY);
+      CREATE TABLE IF NOT EXISTS usage_records (
+        agent_id TEXT NOT NULL, session_id TEXT NOT NULL, report_id TEXT NOT NULL, generation TEXT NOT NULL,
+        recorded_at TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(agent_id, session_id, report_id)
+      );
+      CREATE INDEX IF NOT EXISTS usage_records_agent_time ON usage_records(agent_id, recorded_at);
+      CREATE TABLE IF NOT EXISTS usage_totals (agent_id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS events_tool_context ON events (
         agent_id, json_extract(data, '$.generation'), json_extract(data, '$.data.toolCallId'), seq
       ) WHERE json_extract(data, '$.type') IN ('tool.call', 'tool.update', 'tool.result')
@@ -41,7 +54,51 @@ export class Store {
       .query<{ value: number }, []>("SELECT value FROM meta WHERE key='schema'")
       .get()!.value;
     if (version === 1) this.db.query("UPDATE meta SET value=2 WHERE key='schema'").run();
-    else if (version !== 2) throw new Error(`Unsupported database schema ${version}`);
+    const migratedVersion = this.db.query<{ value: number }, []>("SELECT value FROM meta WHERE key='schema'").get()!.value;
+    if (migratedVersion === 2) this.db.query("UPDATE meta SET value=3 WHERE key='schema'").run();
+    else if (migratedVersion !== 3) throw new Error(`Unsupported database schema ${migratedVersion}`);
+  }
+  /** Idempotently persists a usage notification and its public history event. */
+  recordUsage(record: UsageRecord, maxEvents: number): { inserted: boolean; event?: ServerEvent; usage?: DurableUsageTotals; agentUsage?: import("./types.ts").AgentUsageTotals } {
+    return this.db.transaction(() => {
+      const result = this.db.query(`INSERT OR IGNORE INTO usage_records
+        (agent_id, session_id, report_id, generation, recorded_at, data) VALUES (?, ?, ?, ?, ?, ?)`)
+        .run(record.agentId, record.sessionId, record.reportId, record.generation, record.recordedAt, JSON.stringify(record));
+      if (result.changes === 0) return { inserted: false };
+      const current = this.db.query<{ data: string }, [string]>("SELECT data FROM usage_totals WHERE agent_id=?").get(record.agentId);
+      const usage: DurableUsageTotals = current ? JSON.parse(current.data) : { reports: 0, metrics: {}, latestAt: null };
+      for (const [id, value] of Object.entries(record.metrics)) {
+        const entry = usage.metrics[id] ?? { total: 0, observations: 0 };
+        const total = entry.total + value;
+        if (!Number.isFinite(total) || ((id.startsWith("token.") || id.startsWith("tokens.")) && !Number.isSafeInteger(total))) throw new ApiError("LIMIT", `Usage aggregate overflow for ${id}`);
+        usage.metrics[id] = { total, observations: entry.observations + 1 };
+      }
+      usage.reports++;
+      if (usage.latestAt === null || record.recordedAt.localeCompare(usage.latestAt) > 0) usage.latestAt = record.recordedAt;
+      this.db.query("INSERT OR REPLACE INTO usage_totals VALUES (?, ?)").run(record.agentId, JSON.stringify(usage));
+      const agentRow = this.db.query<{ data: string }, [string]>("SELECT data FROM agents WHERE id=?").get(record.agentId);
+      if (!agentRow) throw new ApiError("NOT_FOUND", "Usage agent record not found");
+      const agent = JSON.parse(agentRow.data) as AgentRecord;
+      const agentUsage = {
+        self: Object.fromEntries(Object.entries(usage.metrics).map(([id, metric]) => [id, metric.total])),
+        reporting: { reports: usage.reports, latestAt: usage.latestAt, metrics: Object.fromEntries(Object.entries(usage.metrics).map(([id, metric]) => [id, { observations: metric.observations, contributors: 1 }])) },
+      };
+      agent.usage = agentUsage;
+      this.db.query("UPDATE agents SET data=? WHERE id=?").run(JSON.stringify(agent), record.agentId);
+      this.db.exec("UPDATE meta SET value=value+1 WHERE key='sequence'");
+      const seq = this.sequence();
+      const data = { version: 1, agentId: record.agentId, sessionId: record.sessionId, reportId: record.reportId, metrics: Object.fromEntries(Object.entries(usage.metrics).map(([id, metric]) => [id, metric.total])), reporting: { reports: usage.reports, metrics: Object.fromEntries(Object.entries(usage.metrics).map(([id, metric]) => [id, { observations: metric.observations, contributors: 1 }])) } };
+      const event: ServerEvent = { kind: "event", seq, time: record.recordedAt, type: "agent.usage", agentId: record.agentId, generation: record.generation, data };
+      this.db.query("INSERT INTO events VALUES (?, ?, ?)").run(seq, record.agentId, JSON.stringify(event));
+      if (maxEvents > 0) this.db.query("DELETE FROM events WHERE seq <= ?").run(seq - maxEvents);
+      return { inserted: true, event, usage, agentUsage };
+    })();
+  }
+  usageTotals(agentIds: string[]): Record<string, DurableUsageTotals> {
+    if (agentIds.length === 0) return {};
+    const placeholders = agentIds.map(() => "?").join(",");
+    const rows = this.db.query<{ agent_id: string; data: string }, string[]>(`SELECT agent_id,data FROM usage_totals WHERE agent_id IN (${placeholders})`).all(...agentIds);
+    return Object.fromEntries(rows.map(row => [row.agent_id, JSON.parse(row.data)]));
   }
   serverSettings(namespace: string): ServerSettingsRecord | undefined {
     const row = this.db.query<{ data: string }, [string]>("SELECT data FROM server_settings WHERE namespace=?").get(namespace);

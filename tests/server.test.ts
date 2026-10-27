@@ -26,6 +26,11 @@ const fixture: ServerPlugin = {
   setup(host) {
     host.registerHarness({
       name: "fixture",
+      usageMetrics: [
+        { id: "tokens.input", title: "Input tokens", unit: "tokens" },
+        { id: "tokens.output", title: "Output tokens", unit: "tokens" },
+        { id: "cost.usd", title: "USD cost", unit: "USD" },
+      ],
       launch(c) {
         return {
           command: process.execPath,
@@ -80,6 +85,7 @@ async function create(
       settings: { harness: "fixture", model: "gpt-6-luna", env },
     }),
   );
+  if (op.status !== "completed") throw new Error(JSON.stringify(op.error));
   expect(op.status).toBe("completed");
   return client.request<AgentRecord>("agent.get", { agentId: op.agentId });
 }
@@ -143,14 +149,74 @@ test("pinned ACP SDK 1.7.0 custom usage notifications traverse the harness trans
     agentId: agent.id, text: "usage-notification-fixture",
   });
   expect((await client.wait(operation)).status).toBe("completed");
-  const event = server.organization.store.history(0, 10_000).events.find((item) =>
-    item.type === "agent.update" && (item.data as any).used === 321,
-  );
-  expect(event?.data).toEqual({
-    used: 321,
-    size: 4096,
-    cost: { amount: 0.0123, currency: "USD" },
+  const event = server.organization.store.history(0, 10_000).events.find((item) => item.type === "agent.usage");
+  expect(event?.data).toMatchObject({
+    version: 1,
+    agentId: agent.id,
+    sessionId: agent.sessionId,
+    reportId: "fixture-usage-report",
+    metrics: { "tokens.input": 0, "tokens.output": 23, "cost.usd": 0.0123, "custom.unknown_metric": 7 },
+    reporting: { reports: 1, metrics: { "tokens.input": { observations: 1, contributors: 1 } } },
   });
+});
+
+test("usage reports deduplicate durably, aggregate by metric, preserve removed descendants and authorize plugin queries", async () => {
+  const plugin: ServerPlugin = { apiVersion: 1, name: "usage-query-fixture", setup(host) {
+    host.registerUsageMetric({ id: "tokens.input", title: "Input tokens", unit: "tokens" });
+    host.registerCapability("usage-query-fixture", { endpoint: "usage.fixture.query" });
+    host.registerEndpoint("usage.fixture.query", (params, caller) => host.queryUsage(params as any, caller));
+  } };
+  const { client, server } = await setup({}, [plugin]);
+  const root = await create(client);
+  const child = await create(client, root.id);
+  const sibling = await create(client, root.id);
+  const queryViaPlugin = async (agentId: string, scope: "self" | "subtree") => client.request<any>("usage.fixture.query", { agentId, scope });
+  for (const id of [root.id, root.id, child.id]) {
+    const op = await client.request<Operation>("agent.prompt", { agentId: id, text: "usage-notification-fixture" });
+    expect((await client.wait(op)).status).toBe("completed");
+  }
+  const oldSessionId = root.sessionId;
+  await client.wait(await client.request<Operation>("agent.restart", { agentId: root.id }));
+  const restartedRoot = await client.request<AgentRecord>("agent.get", { agentId: root.id });
+  expect(restartedRoot.sessionId).toBe(oldSessionId);
+  expect((await client.wait(await client.request<Operation>("agent.prompt", { agentId: root.id, text: "usage-notification-fixture" }))).status).toBe("completed");
+  const childRuntime = (server.organization as any).runtimes.get(child.id);
+  const childClient = await OrganizationClient.connect(server.organization.socketPath, childRuntime.token);
+  clients.push(childClient);
+  await expect(childClient.request("usage.get", { agentId: sibling.id, scope: "self" })).rejects.toMatchObject({ code: "FORBIDDEN" });
+  await client.wait(await client.request<Operation>("agent.remove", { agentId: child.id }));
+  const usage = await queryViaPlugin(root.id, "subtree");
+  expect(usage).toMatchObject({ version: 1, agentId: root.id, scope: "subtree", reporting: { reports: 2, agentCount: 3, includesRemoved: true } });
+  expect(usage.metrics["tokens.input"]).toBe(0);
+  expect(usage.reporting.metrics["tokens.input"]).toEqual({ observations: 2, contributors: 2 });
+  expect(usage.metrics["tokens.output"]).toBe(46);
+  expect(usage.reporting.metrics["tokens.output"]).toEqual({ observations: 2, contributors: 2 });
+  expect(usage.metrics["custom.unknown_metric"]).toBe(14);
+  const filtered = await client.request<any>("usage.get", { agentId: root.id, scope: "subtree", metricIds: ["cost.usd"] });
+  expect(filtered.metrics).toEqual({ "cost.usd": 0.0246 });
+  expect(filtered.catalog.map((metric: any) => metric.id)).toEqual(["cost.usd"]);
+  const runtime = (server.organization as any).runtimes.get(root.id);
+  const agentClient = await OrganizationClient.connect(server.organization.socketPath, runtime.token);
+  clients.push(agentClient);
+  const capability = await client.request<any>("organization.snapshot", {});
+  expect(capability.agents.find((a: AgentRecord) => a.id === root.id).usage).toMatchObject({ self: { "tokens.input": 0 }, subtree: { "tokens.output": 46 }, reporting: { self: { reports: 1 }, subtree: { reports: 2, agentCount: 3, includesRemoved: true } } });
+  expect(capability.capabilities.usage).toMatchObject({ version: 1, notification: "_agentorg/usage", query: "usage.get" });
+  expect(capability.capabilities.plugins["usage-query-fixture"]).toEqual({ endpoint: "usage.fixture.query" });
+  expect(capability.capabilities.usage.metrics).toContainEqual({ id: "cost.usd", title: "USD cost", unit: "USD" });
+  expect(() => server.organization.registerUsageMetric({ id: "tokens.input", title: "Conflicting title", unit: "tokens" })).toThrow("Conflicting usage metric definition");
+});
+
+test("usage reports omit invalid metric fields, preserve zero, and ignore empty reports", async () => {
+  const { client, server } = await setup();
+  const agent = await create(client);
+  const promptOperation = await client.request<Operation>("agent.prompt", { agentId: agent.id, text: "usage-invalid-fixture" });
+  expect((await client.wait(promptOperation)).status).toBe("completed");
+  const report = await client.request<any>("usage.get", { agentId: agent.id, scope: "self" });
+  expect(report.metrics).toEqual({ "tokens.input": 4, "custom.zero": 0 });
+  expect(report.reporting.metrics).toEqual({ "tokens.input": { observations: 1, contributors: 1 }, "custom.zero": { observations: 1, contributors: 1 } });
+  const empty = await client.request<Operation>("agent.prompt", { agentId: agent.id, text: "usage-empty-fixture" });
+  expect((await client.wait(empty)).status).toBe("completed");
+  expect((await client.request<any>("usage.get", { agentId: agent.id, scope: "self" })).reporting.reports).toBe(1);
 });
 
 test("tree lifecycle, revisions, session continuity and preserved workspaces/history", async () => {
@@ -313,6 +379,7 @@ test("MCP SDK bridge enforces direct-child creation and subtree permissions", as
       "prompt_subagent",
       "prompt_parent",
       "get_subagent",
+      "usage_get",
       "snapshot_organization",
       "stop_subagent",
       "restart_subagent",

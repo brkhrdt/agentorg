@@ -123,6 +123,26 @@ test("retains bounded terminal result shapes at maxOperations one without copyin
   expect(ledger).not.toContain("failure");
 }));
 
+test("usage report keys and absolute totals survive reopen and duplicate reports emit no event", () => {
+  const dir = mkdtempSync(join(tmpdir(), "usage-store-")), file = join(dir, "db.sqlite");
+  let store = new Store(file);
+  const agent = { id: "usage-agent", parentId: null, name: "agent", metadata: {}, settings: { harness: "test", options: {} }, state: "idle", revision: 1, generation: "gen-1", sessionId: "session-1", sessionNumber: 1, removedAt: null, createdAt: "now", updatedAt: "now" } as const;
+  const report = { version: 1 as const, sessionId: "session-1", reportId: "report-1", metrics: { "tokens.input": 0, "cost.usd": 1.25 }, agentId: agent.id, generation: "gen-1", recordedAt: "2026-01-01T00:00:00.000Z" };
+  try {
+    store.saveAgent(agent);
+    const inserted = store.recordUsage(report, 0);
+    expect(inserted.inserted).toBe(true);
+    expect(inserted.event?.type).toBe("agent.usage");
+    store.close();
+    store = new Store(file);
+    const duplicate = store.recordUsage({ ...report, generation: "gen-2", recordedAt: "2026-01-02T00:00:00.000Z" }, 0);
+    expect(duplicate.inserted).toBe(false);
+    expect(store.usageTotals([agent.id])[agent.id]?.metrics).toEqual({ "tokens.input": { total: 0, observations: 1 }, "cost.usd": { total: 1.25, observations: 1 } });
+    expect(store.agents()[0]?.usage).toEqual({ self: { "tokens.input": 0, "cost.usd": 1.25 }, reporting: { reports: 1, latestAt: "2026-01-01T00:00:00.000Z", metrics: { "tokens.input": { observations: 1, contributors: 1 }, "cost.usd": { observations: 1, contributors: 1 } } } });
+    expect(store.history(0, 20).events.filter(event => event.type === "agent.usage")).toHaveLength(1);
+  } finally { try { store.close(); } catch {} rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("genuine populated schema version 1 database migrates additively", () => {
   const dir = mkdtempSync(join(tmpdir(), "completion-legacy-")), file = join(dir, "db.sqlite");
   const legacy = new Database(file, { create: true });
@@ -137,9 +157,10 @@ test("genuine populated schema version 1 database migrates additively", () => {
   legacy.close();
   const migrated = new Store(file);
   try {
-    expect(migrated.db.query<{ value: number }, []>("SELECT value FROM meta WHERE key='schema'").get()!.value).toBe(2);
+    expect(migrated.db.query<{ value: number }, []>("SELECT value FROM meta WHERE key='schema'").get()!.value).toBe(3);
     expect(migrated.agents()).toMatchObject([{ id: "legacy-agent" }]);
     expect(migrated.operations().map(o => o.id)).toEqual(["legacy-op"]);
     expect(migrated.completionBatches()).toEqual([]);
+    expect(migrated.db.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('usage_records','usage_totals') ORDER BY name").all().map(row => row.name)).toEqual(["usage_records", "usage_totals"]);
   } finally { migrated.close(); rmSync(dir, { recursive: true, force: true }); }
 });

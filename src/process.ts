@@ -3,6 +3,7 @@ import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 import type { LaunchSpec } from "./plugin.ts";
 import type { Limits } from "./types.ts";
+import { usageNotificationSchema, type UsageNotification } from "./usage.ts";
 
 export async function deadline<T>(
   work: Promise<T>,
@@ -33,7 +34,7 @@ export class AgentProcess {
     spec: LaunchSpec,
     readonly limits: Limits,
     update: (notification: acp.SessionNotification) => void,
-    usage: (notification: Record<string, unknown>) => void,
+    usage: (notification: UsageNotification | null) => void,
     permission: (
       request: acp.RequestPermissionRequest,
     ) => Promise<acp.RequestPermissionResponse>,
@@ -63,11 +64,7 @@ export class AgentProcess {
     this.connection = acp
       .client({ name: "agent-organization" })
       .onNotification("session/update", (ctx) => update(ctx.params))
-      .onNotification("_agentorg/usage", (params: unknown) => {
-        if (params === null || typeof params !== "object" || Array.isArray(params))
-          throw new Error("Invalid _agentorg/usage notification params");
-        return params as Record<string, unknown>;
-      }, (ctx) => usage(ctx.params))
+      .onNotification("_agentorg/usage", usageNotificationSchema, (ctx) => usage(ctx.params))
       .onRequest("session/request_permission", (ctx) => permission(ctx.params))
       .connect(
         acp.ndJsonStream(
