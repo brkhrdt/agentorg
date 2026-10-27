@@ -1610,6 +1610,14 @@ export class Organization implements PluginHost {
               this.update(a.id, generation, notification),
             );
         },
+        (notification) => {
+          if (!this.closing)
+            void this.serialize(() => {
+              const current = this.runtimes.get(a.id);
+              if (current?.generation === generation)
+                this.emit("agent.update", notification, a.id, generation);
+            });
+        },
         (request) => this.permission(a.id, generation, request),
         (message) => {
           if (!this.closing)

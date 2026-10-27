@@ -136,6 +136,23 @@ test("authenticated agent prompt delivers the exact validated issuer cue and bod
   expect(captured.at(-1).text).toBe(`@Root Coordinator ${body}`);
 });
 
+test("pinned ACP SDK 1.7.0 custom usage notifications traverse the harness transport intact", async () => {
+  const { client, server } = await setup();
+  const agent = await create(client);
+  const operation = await client.request<Operation>("agent.prompt", {
+    agentId: agent.id, text: "usage-notification-fixture",
+  });
+  expect((await client.wait(operation)).status).toBe("completed");
+  const event = server.organization.store.history(0, 10_000).events.find((item) =>
+    item.type === "agent.update" && (item.data as any).used === 321,
+  );
+  expect(event?.data).toEqual({
+    used: 321,
+    size: 4096,
+    cost: { amount: 0.0123, currency: "USD" },
+  });
+});
+
 test("tree lifecycle, revisions, session continuity and preserved workspaces/history", async () => {
   const { client, dir } = await setup();
   const root = await create(client);

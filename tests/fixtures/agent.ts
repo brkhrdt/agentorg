@@ -175,6 +175,13 @@ acp
         }
       } finally { await mcp.close(); }
     }
+    if (text === "usage-notification-fixture") {
+      await ctx.client.notify("_agentorg/usage", {
+        used: 321,
+        size: 4096,
+        cost: { amount: 0.0123, currency: "USD" },
+      });
+    }
     if (text === "tui-parent-render-check") {
       const toolCallId = crypto.randomUUID();
       await ctx.client.notify("session/update", { sessionId, update: {
