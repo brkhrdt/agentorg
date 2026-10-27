@@ -1250,7 +1250,7 @@ export class Organization implements PluginHost {
       case "agent.get": {
         const { agentId } = target.parse(params);
         this.authorize(caller, agentId);
-        return { ...structuredClone(this.agent(agentId, false)), usage: this.usageSnapshot(agentId, caller) };
+        return structuredClone(this.agent(agentId, false));
       }
       case "agent.create": {
         const p = z
