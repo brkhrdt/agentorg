@@ -183,6 +183,12 @@ acp
         metrics: { "tokens.input": 0, "tokens.output": 23, "cost.usd": 0.0123, "custom.unknown_metric": 7 },
       });
     }
+    if (text === "usage-notification-no-cost-fixture") {
+      await ctx.client.notify("_agentorg/usage", {
+        version: 1, sessionId, reportId: "fixture-no-cost-report",
+        metrics: { "tokens.input": 0, "tokens.output": 23, "tokens.cache_read": 5, "tokens.total": 28, "custom.fixture": 2 },
+      });
+    }
     if (text === "usage-invalid-fixture") {
       await ctx.client.notify("_agentorg/usage", {
         version: 1,
