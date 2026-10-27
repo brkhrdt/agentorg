@@ -1,4 +1,5 @@
 node_modules/
+.usage-demo-data/
 dist/
 .org/
 *.sqlite*

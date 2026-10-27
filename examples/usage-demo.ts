@@ -17,6 +17,16 @@ async function create(parentId: string | null): Promise<AgentRecord> {
   return await client.request<AgentRecord>("agent.get", { agentId: operation.agentId });
 }
 try {
+  const removeIndex = process.argv.indexOf("--remove-existing-child");
+  if (removeIndex >= 0) {
+    const childId = process.argv[removeIndex + 1];
+    if (!childId) throw new Error("--remove-existing-child requires the child agent ID");
+    const child = await client.request<AgentRecord>("agent.get", { agentId: childId });
+    if (!child.parentId) throw new Error("Selected agent is not a child");
+    await wait(await client.request<Operation>("agent.remove", { agentId: childId }));
+    console.log("Removed child subtree; lifetime parent subtree totals remain:");
+    console.log(JSON.stringify(await client.request("usage.get", { agentId: child.parentId, scope: "subtree" }), null, 2));
+  } else {
   const root = await create(null);
   const child = await create(root.id);
   const grandchild = await create(child.id);
@@ -36,6 +46,7 @@ try {
     const after = await client.request<any>("usage.get", { agentId: root.id, scope: "subtree" });
     console.log("After removing child and grandchild; lifetime subtree totals remain:");
     console.log(JSON.stringify(after, null, 2));
+  }
   }
 } finally {
   client.close();
