@@ -195,7 +195,7 @@ test("prompt display names never rewrite received payloads, and late tools inval
     org.agents.set("child-id", { id: "child-id", name: "[Reviewer] *one*", sessionId: "session-id" } as AgentRecord);
     const e = event("prefix_prompt_subagent", envelope({ answer: "Keep @child-id literally" }), { agentId: "child-id", text: "Keep @child-id literally", queue: true });
     const original = structuredClone(e), rendering = org.renderEvent(e)!;
-    expect(rendering.summary).toStartWith("@\\[Reviewer\\] \\*one\\*"); expect(rendering.toolTarget).toBe("@[Reviewer] *one*");
+    expect(rendering.summary).toStartWith("Coordinator: @\\[Reviewer\\] \\*one\\*"); expect(rendering.toolTarget).toBe("@[Reviewer] *one*"); expect(rendering.toolSender).toBe("Coordinator");
     expect(rendering.full).toContain('"text": "Keep @child-id literally"'); expect(rendering.full).toContain('"answer\\":\\"Keep @child-id literally');
     expect(e).toEqual(original);
     org.operations.set("operation-prompt", { id: "operation-prompt", type: "agent.prompt", agentId: "child-id", caller: { kind: "agent", id: "parent" }, status: "completed", input: {}, result: { text: "A child response", truncated: false }, createdAt: "now" });

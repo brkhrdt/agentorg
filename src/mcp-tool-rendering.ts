@@ -116,7 +116,7 @@ function subject(tool: McpToolName, input: Record<string, any>, context: Readonl
   if (tool === "prompt_subagent" || tool === "prompt_parent") {
     const name = oneLine(tool === "prompt_parent" ? context.parentTargetName ?? "parent" : context.targetName ?? idFor(input, "agentId", "[agent unavailable]")).slice(0, 254).replace(/[\uD800-\uDBFF]$/, "");
     const target = `@${name}`;
-    return { title: `${target} ${typeof input.text === "string" && input.text.trim() ? oneLine(input.text) : "[prompt unavailable]"}`, target };
+    return { title: `${context.senderName ? `${oneLine(context.senderName)}: ` : ""}${target}`, target };
   }
   const args = tool === "snapshot_organization" ? typeof input.path === "string" ? `metadata export · ${oneLine(input.path)}` : "adjacent agents"
     : tool === "create_subagent" ? [input.name, record(input.settings).harness, record(input.settings).model].filter(value => typeof value === "string" && value).map(oneLine).join(" · ") || "child request"
@@ -141,12 +141,15 @@ export function renderMcpTool(tool: McpToolName, event: Readonly<ServerEvent>, c
   if (data.status) details.push(`Tool invocation: ${String(data.status).replace(/_/g, " ")}`);
   const status = invocationError ? "failed invocation" : state ?? (data.status ? `${String(data.status).replace(/_/g, " ")} invocation` : "Status unavailable");
   const priority = [status, decoded.truncated && "[TRUNCATED]", decoded.warning && "[UNDECODED]", ...details.filter(text => !/^(Returned status:|Batch status:|Agent state:|Tool invocation:|Invocation |\[TRUNCATED\])/.test(text)).slice(0, 3)].filter(Boolean).join(" · ");
-  const { title, target } = subject(tool, args, context), heading = literalMarkdown(title);
+  const { title, target } = subject(tool, args, context), promptTool = tool === "prompt_subagent" || tool === "prompt_parent";
+  const promptBody = typeof args.text === "string" ? args.text : "[prompt unavailable]";
+  const heading = promptTool ? literalMarkdown(title) : literalMarkdown(title);
+  const promptSummary = promptTool ? `${heading} ${oneLine(promptBody)}` : heading;
   const operationAgentTargets = tool === "get_operation" && context.targetName ? [context.targetName] : undefined;
   const identity = toolIdentity(event) ?? tool;
-  const full = [heading, literalMarkdown(priority), `Tool: ${literalMarkdown(identity)}`, ...details.map(literalMarkdown),
+  const full = [promptTool ? `${heading}\n\n${promptBody}` : heading, literalMarkdown(priority), `Tool: ${literalMarkdown(identity)}`, ...details.map(literalMarkdown),
     `Input:\n${fenced(pretty(data.rawInput), "json")}`, `Received result:\n${fenced(pretty(has(data, "rawOutput") ? data.rawOutput : data.content), "json")}`, `Decoded MCP value:\n${fenced(pretty(decoded.domain), "json")}`].join("\n\n");
-  return { summary: heading, extended: `${heading}\n${literalMarkdown(priority)}`, full, updateMode: "semantic", extendedLayout: "header-detail", toolSymbol: "∴", ...(target && { toolTarget: target }), ...(operationAgentTargets && { toolTargets: operationAgentTargets }), ...(["prompt_subagent", "prompt_parent"].includes(tool) && { toolPrompt: typeof args.text === "string" ? args.text : "" }), invocationError }
+  return { summary: promptSummary, extended: `${promptSummary}\n${literalMarkdown(priority)}`, full, updateMode: "semantic", extendedLayout: "header-detail", toolSymbol: "∴", ...(target && { toolTarget: target }), ...(operationAgentTargets && { toolTargets: operationAgentTargets }), ...(promptTool && { toolPrompt: promptBody, ...(context.senderName && { toolSender: oneLine(context.senderName) }) }), invocationError }
 }
 const exampleInputs: Record<McpToolName, unknown> = {
   create_subagent:{name:"reviewer",settings:{harness:"pi",model:"provider/model"}}, prompt_subagent:{agentId:"child-1",text:"Review the implementation",queue:true}, prompt_parent:{text:"Status update",queue:true}, get_subagent:{agentId:"child-1"}, snapshot_organization:{path:"reports/agents.json"}, stop_subagent:{agentId:"child-1"}, restart_subagent:{agentId:"child-1"}, restart_subagent_subtree:{agentId:"child-1"}, replace_subagent_session:{agentId:"child-1"}, remove_subagent:{agentId:"child-1"}, modify_subagent:{agentId:"child-1",expectedRevision:3,settings:{model:"provider/model"}}, get_completion:{batchId:"operation-1",after:0,limit:20}, get_operation:{operationId:"operation-1",resultOnly:true}, wait_operation:{operationId:"operation-1",waitMs:1000}, cancel_operation:{operationId:"operation-1"},

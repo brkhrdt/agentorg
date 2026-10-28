@@ -906,7 +906,7 @@ test("authenticated descendant prompts enroll durable server provenance, includi
   expect(batch.memberOperationIds).toContain(issued.id);
   expect((issued.input as any).text).toBe(`@${root.name} sleep:20`);
   const queued = server.organization.store.history(0, 10000).events.find(event => event.type === "prompt.queued" && (event.data as any).operationId === issued.id)!;
-  expect(queued.data).toMatchObject({ text: `@${root.name} sleep:20`, promptCue: { version: 1, bodyStart: `@${root.name} `.length } });
+  expect(queued.data).toMatchObject({ text: `@${root.name} sleep:20`, promptCue: { version: 1, bodyStart: `@${root.name} `.length }, promptAttribution: { version: 1, sender: root.name, recipient: child.name } });
   await until(() => server.organization.operations.get(issued.id)?.status === "completed");
   expect(server.organization.store.completionBatches()[0].memberStatuses?.[issued.id]).toBe("completed");
   await client.wait(parent);

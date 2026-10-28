@@ -355,6 +355,7 @@ export class Organization implements PluginHost {
     return this.renderers.render(presentation, harness, String(this.serverSettings("rendering").defaultToolRenderer), {
       targetName: recipient?.name ?? operationAgent?.name,
       parentTargetName: canonicalTool === "prompt_parent" ? parentName : undefined,
+      senderName: event.agentId ? this.agents.get(event.agentId)?.name : undefined,
     });
   }
   registerEndpoint(
@@ -887,6 +888,7 @@ export class Organization implements PluginHost {
     const enrolled = !!(parentAgent && parentOperation && parentOperation.type === "agent.prompt" && !terminal(parentOperation) && this.isDescendant(a.id, caller.id, false));
     let effectiveText = text;
     let promptCue: { version: 1; bodyStart: number } | undefined;
+    let promptAttribution: { version: 1; sender: string; recipient: string } | undefined;
     if (caller.kind === "agent") {
       const issuer = this.agents.get(caller.id);
       if (!issuer) throw new ApiError("FORBIDDEN", "Authenticated issuing agent is unavailable");
@@ -896,6 +898,7 @@ export class Organization implements PluginHost {
       effectiveText = `${mention} ${text}`;
       if (Buffer.byteLength(effectiveText) > this.limits.maxPromptBytes) throw new ApiError("LIMIT", "Prompt size limit reached after adding issuer mention");
       promptCue = { version: 1, bodyStart: mention.length + 1 };
+      promptAttribution = { version: 1, sender: issuerName, recipient: a.name };
     }
     const op: Operation = { id: crypto.randomUUID(), type: "agent.prompt", agentId: a.id, input: { agentId: a.id, text: effectiveText, queue }, caller: structuredClone(caller), status: "queued", createdAt: now() };
     if (enrolled) {
@@ -913,7 +916,7 @@ export class Organization implements PluginHost {
     }
     rt.queue.push(op);
     if (!rt.active) this.state(a, "waiting");
-    this.emit("prompt.queued", { operationId: op.id, text: effectiveText, ...(promptCue ? { promptCue } : {}) }, a.id, rt.generation);
+    this.emit("prompt.queued", { operationId: op.id, text: effectiveText, ...(promptCue ? { promptCue } : {}), ...(promptAttribution ? { promptAttribution } : {}) }, a.id, rt.generation);
     return structuredClone(op);
   }
   async request(
