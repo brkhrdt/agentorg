@@ -24,6 +24,7 @@ import type {
   ExtensionSettings,
   MutationContext,
   MutationChange,
+  SteeringStatus,
 } from "./plugin.ts";
 import {
   ApiError,
@@ -55,11 +56,25 @@ interface ActivePrompt {
   work: Promise<acp.PromptResponse>;
   cancelling: boolean;
 }
+interface PendingSteering {
+  steeringId: string;
+  operationId: string;
+  agentId: string;
+  generation: string;
+  caller: string;
+  text: string;
+  phase: "submitted" | "pending";
+  pendingRequired?: boolean;
+  terminal?: { status: "delivered" | "failed"; error?: unknown };
+  retryTimer?: ReturnType<typeof setTimeout>;
+  retryAttempts?: number;
+}
 interface Runtime {
   process: AgentProcess;
   generation: string;
   token: string;
   queue: Operation[];
+  steerings: Map<string, PendingSteering>;
   active?: ActivePrompt;
   startRetry?: ReturnType<typeof setTimeout>;
   executionEnvironment?: LaunchContext["executionEnvironment"];
@@ -157,6 +172,7 @@ export class Organization implements PluginHost {
   private readonly serverSettingsRegistry: ServerSettingsRegistry;
   private loadedPlugins: string[] = [];
   private runtimes = new Map<string, Runtime>();
+  private steeringWrites = new Map<string, { runtime: Runtime; request: PendingSteering }>();
   private tokens = new Map<string, string>();
   private harnesses = new Map<string, HarnessPlugin>();
   private renderers = new RendererRegistry();
@@ -998,6 +1014,7 @@ export class Organization implements PluginHost {
     const a = this.agent(agentId), rt = this.runtimes.get(a.id);
     if (!rt || ["stopped", "failed", "starting"].includes(a.state)) throw new ApiError("NOT_RUNNING", "Agent is not available");
     if (queue && rt.queue.length >= this.limits.maxQueuedPrompts) throw new ApiError("LIMIT", "Prompt queue limit reached");
+    const effect = queue ? "queue" : rt.active || rt.queue.length ? "interrupt" : "normal";
     const parentRuntime = downward && caller.kind === "agent" ? this.runtimes.get(caller.id) : undefined;
     const parentAgent = downward && caller.kind === "agent" ? this.agents.get(caller.id) : undefined;
     const parentOperation = parentRuntime?.active?.op;
@@ -1032,7 +1049,7 @@ export class Organization implements PluginHost {
     }
     rt.queue.push(op);
     if (!rt.active) this.state(a, "waiting");
-    this.emit("prompt.queued", { operationId: op.id, text: effectiveText, ...(promptCue ? { promptCue } : {}), ...(promptAttribution ? { promptAttribution } : {}) }, a.id, rt.generation);
+    this.emit("prompt.queued", { operationId: op.id, text: effectiveText, effect, ...(promptCue ? { promptCue } : {}), ...(promptAttribution ? { promptAttribution } : {}) }, a.id, rt.generation);
     return structuredClone(op);
   }
   async request(
@@ -1041,7 +1058,7 @@ export class Organization implements PluginHost {
     caller: Caller = { kind: "server", id: "server" },
     authenticatedAgent?: AuthenticatedAgentContext,
   ): Promise<unknown> {
-    if (this.mutationContext.getStore() && /^(agent\.(create|modify|stop|restart|restart_subtree|replace_session|remove|prompt|prompt_parent)|operation\.(wait|cancel)|organization\.settings\.update)$/.test(method))
+    if (this.mutationContext.getStore() && /^(agent\.(create|modify|stop|restart|restart_subtree|replace_session|remove|prompt|prompt_parent|steer)|operation\.(wait|cancel)|organization\.settings\.update)$/.test(method))
       throw new ApiError("NESTED_MUTATION", "Lifecycle hooks cannot enqueue or wait for mutations");
     if (this.closing)
       throw new ApiError("SHUTTING_DOWN", "Server is shutting down");
@@ -1464,6 +1481,35 @@ export class Organization implements PluginHost {
         const p = z.object({ agentId: z.string(), text: z.string().min(1), queue: z.boolean().default(false) }).strict().parse(params);
         return this.admitPrompt(p.agentId, p.text, p.queue, caller, authenticatedAgent, true);
       }
+      case "agent.steer": {
+        if (caller.kind === "agent") throw new ApiError("FORBIDDEN", "Agent-issued steering is not enabled");
+        const p = z.object({ agentId: z.string(), operationId: z.string().min(1), text: z.string().min(1) }).strict().parse(params);
+        if (Buffer.byteLength(p.text) > this.limits.maxPromptBytes) throw new ApiError("LIMIT", "Steering text exceeds prompt size limit");
+        const steeringId = crypto.randomUUID();
+        const accepted = await this.serialize(() => {
+          this.authorize(caller, p.agentId);
+          const agent = this.agent(p.agentId), runtime = this.runtimes.get(agent.id);
+          const active = runtime?.active;
+          const failure = !runtime || !active || active.op.id !== p.operationId || active.op.type !== "agent.prompt" || terminal(active.op) || active.cancelling || active.op.cancelRequested
+            ? new ApiError("NOT_ACTIVE", "The specified prompt operation is not active")
+            : !runtime.process.supportsSteering ? new ApiError("UNSUPPORTED", "Harness does not advertise in-place steering support")
+            : [...runtime.steerings.values()].some(request => request.operationId === p.operationId) ? new ApiError("STEERING_PENDING", "A steering request is already pending for this operation")
+            : undefined;
+          if (failure) {
+            try { this.emit("prompt.steer_failed", { steeringId, operationId: p.operationId, caller: caller.id, text: p.text, error: errorShape(failure) }, p.agentId, runtime?.generation); } catch {}
+            return { failure };
+          }
+          const record: PendingSteering = { steeringId, operationId: p.operationId, agentId: agent.id, generation: runtime!.generation, caller: caller.id, text: p.text, phase: "submitted" };
+          runtime!.steerings.set(steeringId, record);
+          this.steeringWrites.set(steeringId, { runtime: runtime!, request: record });
+          try { this.emit("prompt.steer_submitted", { steeringId, operationId: p.operationId, caller: caller.id, text: p.text }, p.agentId, runtime!.generation); }
+          catch (error) { runtime!.steerings.delete(steeringId); this.steeringWrites.delete(steeringId); throw error; }
+          return { runtime: runtime!, process: runtime!.process, generation: runtime!.generation, record };
+        });
+        if ("failure" in accepted) throw accepted.failure;
+        void this.dispatchSteering(p.agentId, accepted.generation, accepted.process, accepted.record);
+        return { agentId: p.agentId, operationId: p.operationId, steeringId, disposition: "submitted" as const };
+      }
       case "agent.prompt_parent": {
         const p = z.object({ text: z.string().min(1), queue: z.boolean().default(true) }).strict().parse(params);
         if (caller.kind !== "agent") throw new ApiError("FORBIDDEN", "Only agents may prompt their parent");
@@ -1742,12 +1788,15 @@ export class Organization implements PluginHost {
             void this.serialize(() => this.receiveUsage(a.id, generation, notification));
         },
         (request) => this.permission(a.id, generation, request),
+        (status) => {
+          if (!this.closing) void this.serialize(() => this.steeringStatus(a.id, generation, status));
+        },
         (message) => {
           if (!this.closing)
             void this.serialize(() => this.crashed(a.id, generation, message));
         },
       );
-      rt = { process: proc, generation, token, queue: [], executionEnvironment: context.executionEnvironment };
+      rt = { process: proc, generation, token, queue: [], steerings: new Map(), executionEnvironment: context.executionEnvironment };
       this.runtimes.set(a.id, rt);
       this.tokens.set(token, a.id);
       await deadline(
@@ -1773,6 +1822,7 @@ export class Organization implements PluginHost {
   private async stop(a: AgentRecord, error?: Error, reason: "restart" | "settings-restart" | "shutdown" | "explicit" | "failure" = "explicit") {
     const rt = this.runtimes.get(a.id);
     if (rt) {
+      this.failSteerings(rt, undefined, new ApiError("HARNESS_STOPPED", "Harness stopped before steering delivery was confirmed"));
       this.runtimes.delete(a.id);
       this.tokens.delete(rt.token);
       this.cancelPermissions(a.id);
@@ -1798,6 +1848,101 @@ export class Organization implements PluginHost {
     await this.stop(a, new ApiError("PROCESS_EXITED", message), "failure");
     this.state(a, "failed", message);
     this.emit("agent.error", { message }, id, generation);
+  }
+  private completeSteering(rt: Runtime, request: PendingSteering, status: "delivered" | "failed", error?: unknown, requirePending = false) {
+    if (rt.steerings.get(request.steeringId) !== request) return;
+    request.pendingRequired ||= requirePending;
+    request.terminal ??= { status, error };
+    this.flushSteering(rt, request);
+  }
+  private markSteeringPending(rt: Runtime, request: PendingSteering) {
+    if (rt.steerings.get(request.steeringId) !== request) return;
+    request.pendingRequired = true;
+    this.flushSteering(rt, request);
+  }
+  private flushSteering(rt: Runtime, request: PendingSteering) {
+    if (rt.steerings.get(request.steeringId) !== request || request.retryTimer) return;
+    if (request.pendingRequired && request.phase === "submitted") {
+      try {
+        this.emit("prompt.steer_pending", { steeringId: request.steeringId, operationId: request.operationId, caller: request.caller, text: request.text }, request.agentId, request.generation);
+        request.phase = "pending";
+      } catch {
+        this.scheduleSteeringRetry(rt, request);
+        return;
+      }
+    }
+    if (!request.terminal) return;
+    const { status, error } = request.terminal;
+    const common = { steeringId: request.steeringId, operationId: request.operationId, caller: request.caller, text: request.text };
+    try {
+      this.emit(status === "delivered" ? "prompt.steer_delivered" : "prompt.steer_failed",
+        status === "delivered" ? common : { ...common, error: errorShape(error ?? new ApiError("STEERING_FAILED", "Harness failed to deliver guidance")) },
+        request.agentId, request.generation);
+    } catch {
+      this.scheduleSteeringRetry(rt, request);
+      return;
+    }
+    if (request.retryTimer) clearTimeout(request.retryTimer);
+    rt.steerings.delete(request.steeringId);
+    this.steeringWrites.delete(request.steeringId);
+  }
+  private scheduleSteeringRetry(rt: Runtime, request: PendingSteering) {
+    if (request.retryTimer || this.closing) return;
+    const delay = Math.min(1000, 25 * 2 ** (request.retryAttempts ?? 0));
+    request.retryAttempts = Math.min((request.retryAttempts ?? 0) + 1, 6);
+    request.retryTimer = setTimeout(() => {
+      request.retryTimer = undefined;
+      if (!this.closing) void this.serialize(() => this.flushSteering(rt, request)).catch(() => this.scheduleSteeringRetry(rt, request));
+    }, delay);
+  }
+  private async drainSteeringEvents() {
+    const deadline = Date.now() + 1000;
+    for (const { runtime, request } of [...this.steeringWrites.values()]) {
+      let delay = 25;
+      while (this.steeringWrites.get(request.steeringId)?.request === request) {
+        if (request.retryTimer) clearTimeout(request.retryTimer);
+        request.retryTimer = undefined;
+        this.flushSteering(runtime, request);
+        if (this.steeringWrites.get(request.steeringId)?.request !== request) break;
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) throw new ApiError("STEERING_DRAIN_FAILED", `Steering lifecycle events for ${request.steeringId} were not persisted; storage remains open`);
+        await new Promise((resolve) => setTimeout(resolve, Math.min(delay, remaining)));
+        delay = Math.min(250, delay * 2);
+      }
+    }
+  }
+  private async dispatchSteering(agentId: string, generation: string, process: AgentProcess, request: PendingSteering) {
+    try {
+      const response = await process.steer(request.operationId, request.steeringId, request.text);
+      if (response.operationId !== request.operationId || response.steeringId !== request.steeringId || response.disposition !== "pending")
+        throw new ApiError("INVALID_STEERING_ACK", "Harness returned an invalid steering acceptance");
+      await this.serialize(() => {
+        const runtime = this.runtimes.get(agentId), current = runtime?.steerings.get(request.steeringId);
+        if (!runtime || runtime.generation !== generation || current !== request) return;
+        // A very fast harness may report final delivery before its request response arrives.
+        this.markSteeringPending(runtime, request);
+      });
+    } catch (error) {
+      await this.serialize(() => {
+        const runtime = this.runtimes.get(agentId), current = runtime?.steerings.get(request.steeringId);
+        if (runtime && runtime.generation === generation && current === request)
+          this.completeSteering(runtime, request, "failed", error);
+      });
+    }
+  }
+  private steeringStatus(agentId: string, generation: string, status: SteeringStatus) {
+    const runtime = this.runtimes.get(agentId);
+    if (!runtime || runtime.generation !== generation || !status || status.sessionId !== runtime.process.sessionId || !["delivered", "failed"].includes(status.status)) return;
+    const request = runtime.steerings.get(status.steeringId);
+    if (!request || request.operationId !== status.operationId) return;
+    // A terminal callback proves the harness accepted the steer even if its initial
+    // response was delayed; persist pending before the terminal transition.
+    if (status.status === "delivered") this.completeSteering(runtime, request, "delivered", undefined, true);
+    else if (status.status === "failed") this.completeSteering(runtime, request, "failed", new ApiError(status.error?.code ?? "STEERING_FAILED", status.error?.message ?? "Harness failed to deliver guidance"), true);
+  }
+  private failSteerings(rt: Runtime, operationId?: string, error: unknown = new ApiError("PROMPT_SETTLED", "Prompt settled before steering delivery was confirmed")) {
+    for (const request of [...rt.steerings.values()])
+      if (operationId === undefined || request.operationId === operationId) this.completeSteering(rt, request, "failed", error);
   }
   private update(
     id: string,
@@ -1872,7 +2017,7 @@ export class Organization implements PluginHost {
       try { this.emit("operation.changed", op, op.agentId ?? undefined); } catch {}
       try { this.state(a, "running"); } catch {}
       try { this.emit("prompt.started", { operationId: op.id }, id, rt.generation); } catch {}
-      const work = rt.process.prompt((op.input as { text: string }).text);
+      const work = rt.process.prompt((op.input as { text: string }).text, op.id);
       rt.active = { op, work, cancelling: false };
       void work.then(
         (result) => {
@@ -1898,6 +2043,7 @@ export class Organization implements PluginHost {
     error?: unknown,
   ) {
     if (this.runtimes.get(id) !== rt || rt.active?.op.id !== op.id) return;
+    this.failSteerings(rt, op.id, new ApiError("PROMPT_SETTLED", "Prompt settled before steering delivery was confirmed"));
     // Diagnostics are best-effort: a failed event write must never strand the ACP
     // completion callback before its retry-protected durable terminal transition.
     if (error) {
@@ -2166,11 +2312,12 @@ export class Organization implements PluginHost {
     this.closing = true;
     if (this.completionRetryTimer) clearTimeout(this.completionRetryTimer);
     this.completionRetryTimer = undefined;
-    this.closePromise = this.serialize(async () => {
+    const closing = this.serialize(async () => {
       for (const a of [...this.agents.values()]
         .filter((a) => this.runtimes.has(a.id))
         .sort((a, b) => this.depth(b) - this.depth(a)))
         await this.stop(a, undefined, "shutdown");
+      await this.drainSteeringEvents();
       for (const op of this.operations.values())
         if (!terminal(op)) this.finish(op, "stopped");
       this.emit("server.stopped", {});
@@ -2187,6 +2334,10 @@ export class Organization implements PluginHost {
       }
       this.listeners.clear();
       this.store.close();
+    });
+    this.closePromise = closing.catch((error) => {
+      this.closePromise = undefined;
+      throw error;
     });
     return this.closePromise;
   }

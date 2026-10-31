@@ -13,6 +13,18 @@ export { editDiff } from "./tool-diff.ts";
 export { MCP_TOOL_NAMES, renderMcpTool, coreMcpRenderers, decodeMcpOutput } from "./mcp-tool-rendering.ts";
 
 export const PLUGIN_API_VERSION = 1 as const;
+export {
+  STEERING_EXTENSION,
+  STEERING_METHOD,
+  STEERING_STATUS_METHOD,
+  STEERING_VERSION,
+  steeringCapability,
+  type SteeringCapability,
+  type SteeringRequest,
+  type SteeringResponse,
+  type SteeringStatus,
+  type SteeringRunMetadata,
+} from "./steering-contract.ts";
 export interface LaunchSpec {
   command: string;
   args: string[];

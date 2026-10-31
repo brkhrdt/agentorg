@@ -290,12 +290,18 @@ export class OrganizationServer {
   close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
     this.ready = false;
-    this.closePromise = (async () => {
+    const closing = (async () => {
       const closed = new Promise<void>((resolveClose) => {
         if (this.server.listening) this.server.close(() => resolveClose());
         else resolveClose();
       });
-      await this.organization.close();
+      try {
+        await this.organization.close();
+      } catch (error) {
+        for (const socket of this.clients) socket.destroy();
+        await closed;
+        throw error;
+      }
       for (const socket of this.clients) socket.destroy();
       await closed;
       if (this.ownsSocket) {
@@ -307,6 +313,10 @@ export class OrganizationServer {
         unlinkSync(this.lockPath);
       } catch {}
     })();
+    this.closePromise = closing.catch((error) => {
+      this.closePromise = undefined;
+      throw error;
+    });
     return this.closePromise;
   }
 }

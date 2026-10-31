@@ -5,10 +5,14 @@ import { Readable, Writable } from "node:stream";
 import { appendFileSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { OrganizationClient } from "../../src/client.ts";
+import { STEERING_EXTENSION, STEERING_METHOD, STEERING_STATUS_METHOD, STEERING_VERSION } from "../../src/steering-contract.ts";
+import { z } from "zod";
 import type { AgentRecord, Operation } from "../../src/types.ts";
 
 let sessionId: string = crypto.randomUUID();
 let cancelled = false;
+let activeOperationId = "";
+let steeringText = "";
 let mcpServers: acp.McpServer[] = [];
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 async function connectBridge() {
@@ -51,12 +55,20 @@ acp
     await delay(Number(process.env.START_DELAY ?? 0));
     return {
       protocolVersion: acp.PROTOCOL_VERSION,
-      agentCapabilities: { loadSession: true },
+      agentCapabilities: { loadSession: true, ...(process.env.STEERING_DISABLED ? {} : { _meta: { [STEERING_EXTENSION]: { version: STEERING_VERSION } } }) },
     };
   })
   .onRequest("session/new", (ctx) => {
     mcpServers = ctx.params.mcpServers ?? [];
     return { sessionId };
+  })
+  .onRequest(STEERING_METHOD, z.object({ sessionId: z.string(), operationId: z.string(), steeringId: z.string(), text: z.string() }).strict(), (ctx) => {
+    const p = ctx.params;
+    if (p.sessionId !== sessionId || p.operationId !== activeOperationId) throw new Error("wrong fixture operation");
+    if (process.env.STEERING_REJECT) throw new Error("fixture steering rejection");
+    steeringText = p.text;
+    setTimeout(() => { void ctx.client.notify(STEERING_STATUS_METHOD, { sessionId, operationId: p.operationId, steeringId: p.steeringId, status: process.env.STEERING_FAIL ? "failed" : "delivered", ...(process.env.STEERING_FAIL ? { error: { code: "NOT_DELIVERED", message: "fixture did not deliver steering" } } : {}) }); }, Number(process.env.STEERING_DELIVERY_DELAY ?? 15));
+    return { operationId: p.operationId, steeringId: p.steeringId, disposition: "pending" };
   })
   .onRequest("session/load", (ctx) => {
     sessionId = ctx.params.sessionId;
@@ -65,6 +77,8 @@ acp
   })
   .onRequest("session/prompt", async (ctx) => {
     cancelled = false;
+    activeOperationId = (ctx.params._meta?.[STEERING_EXTENSION] as any)?.operationId ?? "";
+    steeringText = "";
     const incomingText = ctx.params.prompt
       .map((b) => (b.type === "text" ? b.text : ""))
       .join("");
@@ -85,6 +99,15 @@ acp
     }
     // This fake harness recognizes the fixture's single-token issuer names; production adapters never strip the core cue.
     const text = incomingText.replace(/^@[^ ]+ /, "");
+    if (process.env.PROMPT_ORDER_FILE) appendFileSync(process.env.PROMPT_ORDER_FILE, `${text}\n`);
+    if (text.startsWith("barrier:") && process.env.PROMPT_BARRIER_DIR) {
+      const name = text.slice("barrier:".length);
+      writeFileSync(join(process.env.PROMPT_BARRIER_DIR, `${name}.started`), "started");
+      while (!existsSync(join(process.env.PROMPT_BARRIER_DIR, `${name}.release`))) {
+        if (cancelled && !process.env.IGNORE_CANCEL) break;
+        await delay(5);
+      }
+    }
     if (text === "sibling-barrier" && process.env.SIBLING_BARRIER_DIR) {
       writeFileSync(join(process.env.SIBLING_BARRIER_DIR, "sibling.started"), "started");
       while (!existsSync(join(process.env.SIBLING_BARRIER_DIR, "sibling.release"))) await delay(10);
@@ -242,7 +265,7 @@ acp
       sessionId,
       update: {
         sessionUpdate: "agent_message_chunk",
-        content: { type: "text", text: text === "cwd" ? process.cwd() : `done:${text}` },
+        content: { type: "text", text: text === "cwd" ? process.cwd() : `done:${text}${steeringText ? `;steered:${steeringText}` : ""}` },
       },
     });
     return { stopReason: cancelled ? "cancelled" : "end_turn" };
