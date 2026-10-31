@@ -1,8 +1,18 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
+import { z } from "zod";
 import type { LaunchSpec } from "./plugin.ts";
 import type { Limits } from "./types.ts";
+import {
+  STEERING_EXTENSION,
+  STEERING_METHOD,
+  STEERING_STATUS_METHOD,
+  STEERING_VERSION,
+  steeringCapability,
+  type SteeringResponse,
+  type SteeringStatus,
+} from "./steering-contract.ts";
 
 export async function deadline<T>(
   work: Promise<T>,
@@ -29,6 +39,7 @@ export class AgentProcess {
   stopping = false;
   stderr = "";
   private gracefulStop?: LaunchSpec["gracefulStop"];
+  private steeringSupported = false;
   constructor(
     spec: LaunchSpec,
     readonly limits: Limits,
@@ -36,6 +47,7 @@ export class AgentProcess {
     permission: (
       request: acp.RequestPermissionRequest,
     ) => Promise<acp.RequestPermissionResponse>,
+    steeringStatus: (status: SteeringStatus) => void,
     exit: (message: string) => void,
   ) {
     this.gracefulStop = spec.gracefulStop;
@@ -63,6 +75,7 @@ export class AgentProcess {
       .client({ name: "agent-organization" })
       .onNotification("session/update", (ctx) => update(ctx.params))
       .onRequest("session/request_permission", (ctx) => permission(ctx.params))
+      .onNotification(STEERING_STATUS_METHOD, z.object({ sessionId: z.string(), operationId: z.string().min(1), steeringId: z.string().min(1), status: z.enum(["delivered", "failed"]), error: z.object({ code: z.string().optional(), message: z.string() }).optional() }).strict(), (ctx) => steeringStatus(ctx.params as SteeringStatus))
       .connect(
         acp.ndJsonStream(
           Writable.toWeb(this.child.stdin),
@@ -76,6 +89,9 @@ export class AgentProcess {
       if (!this.stopping) exit(`ACP connection closed ${this.stderr}`);
     });
   }
+  get supportsSteering() {
+    return this.steeringSupported;
+  }
   async start(
     cwd: string,
     sessionId: string,
@@ -88,6 +104,9 @@ export class AgentProcess {
     });
     if (init.protocolVersion !== acp.PROTOCOL_VERSION)
       throw new Error("Unsupported ACP version");
+    this.steeringSupported = steeringCapability(
+      init.agentCapabilities?._meta?.[STEERING_EXTENSION],
+    );
     if (resume && init.agentCapabilities?.loadSession) {
       await this.connection.agent.request("session/load", {
         cwd,
@@ -103,10 +122,21 @@ export class AgentProcess {
       this.sessionId = session.sessionId;
     }
   }
-  prompt(text: string) {
+  prompt(text: string, operationId: string) {
     return this.connection.agent.request("session/prompt", {
       sessionId: this.sessionId,
       prompt: [{ type: "text", text }],
+      _meta: { [STEERING_EXTENSION]: { version: STEERING_VERSION, operationId } },
+    });
+  }
+  async steer(operationId: string, steeringId: string, text: string): Promise<SteeringResponse> {
+    if (!this.steeringSupported)
+      throw new Error("Harness does not advertise in-place steering support");
+    return this.connection.agent.request<SteeringResponse>(STEERING_METHOD, {
+      sessionId: this.sessionId,
+      operationId,
+      steeringId,
+      text,
     });
   }
   cancel() {

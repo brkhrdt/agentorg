@@ -98,9 +98,9 @@ async function prompt(
 ) {
   return client.request<Operation>("agent.prompt", { agentId, text, queue });
 }
-async function until(predicate: () => boolean, ms = 2000) {
+async function until(predicate: () => boolean | Promise<boolean>, ms = 2000) {
   const end = Date.now() + ms;
-  while (!predicate()) {
+  while (!(await predicate())) {
     if (Date.now() > end) throw new Error("Condition timed out");
     await Bun.sleep(5);
   }
@@ -196,6 +196,178 @@ test("tree lifecycle, revisions, session continuity and preserved workspaces/his
       .request("agent.prompt", { agentId: child.id, text: "no" })
       .catch((e: any) => e.code),
   ).toBe("NOT_FOUND");
+});
+
+test("in-place steering targets the active operation without creating or cancelling a prompt", async () => {
+  const { client, server } = await setup();
+  const root = await create(client);
+  const operation = await prompt(client, root.id, "sleep:350");
+  await until(async () => (await client.request<Operation>("operation.get", { operationId: operation.id })).status === "running");
+  await expect(client.request("agent.steer", { agentId: root.id, operationId: "different-operation", text: "must not retarget" })).rejects.toMatchObject({ code: "NOT_ACTIVE" });
+  const receipt = await client.request<any>("agent.steer", { agentId: root.id, operationId: operation.id, text: "follow this guidance" });
+  expect(receipt).toMatchObject({ agentId: root.id, operationId: operation.id, disposition: "submitted", steeringId: expect.any(String) });
+  expect((await client.request<Operation>("operation.get", { operationId: operation.id })).status).toBe("running");
+  const snapshot = await client.request<{ operations: Operation[] }>("organization.snapshot");
+  expect(snapshot.operations.filter(op => op.agentId === root.id && op.type === "agent.prompt")).toHaveLength(1);
+  const done = await client.wait(operation);
+  expect(done.status).toBe("completed");
+  expect((done.result as any).text).toContain("steered:follow this guidance");
+  const history = server.organization.store.history(0, 1000).events;
+  expect(history.filter(event => event.type === "prompt.started" && (event.data as any).operationId === operation.id)).toHaveLength(1);
+  await until(() => {
+    const types = server.organization.store.history(0, 1000).events.filter(event => (event.data as any).operationId === operation.id).map(event => event.type);
+    return types.includes("prompt.steer_pending") && types.includes("prompt.steer_delivered");
+  });
+  const lifecycle = server.organization.store.history(0, 1000).events.filter(event => event.type.startsWith("prompt.steer_") && (event.data as any).operationId === operation.id);
+  expect(lifecycle.map(event => event.type)).toEqual(["prompt.steer_submitted", "prompt.steer_pending", "prompt.steer_delivered"]);
+  expect(new Set(lifecycle.map(event => (event.data as any).steeringId)).size).toBe(1);
+  await expect(client.request("agent.steer", { agentId: root.id, operationId: operation.id, text: "too late" })).rejects.toMatchObject({ code: "NOT_ACTIVE" });
+});
+
+test("in-place steering fails closed when the harness does not advertise the private capability", async () => {
+  const { client } = await setup();
+  const root = await create(client, null, { STEERING_DISABLED: "1" });
+  const operation = await prompt(client, root.id, "sleep:200");
+  await until(async () => (await client.request<Operation>("operation.get", { operationId: operation.id })).status === "running");
+  await expect(client.request("agent.steer", { agentId: root.id, operationId: operation.id, text: "must not send" })).rejects.toMatchObject({ code: "UNSUPPORTED" });
+  expect((await client.request<Operation>("operation.get", { operationId: operation.id })).status).toBe("running");
+  expect((await client.wait(operation)).status).toBe("completed");
+});
+
+test("steering failures are reported asynchronously after submission without cancelling the prompt", async () => {
+  const { client, server } = await setup();
+  const root = await create(client, null, { STEERING_FAIL: "1" });
+  const operation = await prompt(client, root.id, "sleep:300");
+  await until(async () => (await client.request<Operation>("operation.get", { operationId: operation.id })).status === "running");
+  const receipt = await client.request<any>("agent.steer", { agentId: root.id, operationId: operation.id, text: "will fail" });
+  const steeringId = receipt.steeringId;
+  expect(receipt).toMatchObject({ disposition: "submitted" });
+  expect(typeof steeringId).toBe("string");
+  expect((await client.request<Operation>("operation.get", { operationId: operation.id })).status).toBe("running");
+  await until(() => server.organization.store.history(0, 1000).events.some(event => event.type === "prompt.steer_failed" && (event.data as any).steeringId === steeringId));
+  const events = server.organization.store.history(0, 1000).events;
+  const lifecycle = events.filter(event => event.type.startsWith("prompt.steer_") && (event.data as any).steeringId === steeringId);
+  expect(lifecycle.map(event => event.type)).toEqual(["prompt.steer_submitted", "prompt.steer_pending", "prompt.steer_failed"]);
+  const failed = lifecycle.at(-1)!;
+  expect((failed.data as any).error).toMatchObject({ code: expect.any(String), message: expect.any(String) });
+  expect((await client.wait(operation)).status).toBe("completed");
+});
+
+test("pending steering event write retries before a terminal event without stranding the prompt", async () => {
+  const { client, server } = await setup();
+  const root = await create(client);
+  const store = server.organization.store as any;
+  const originalEvent = store.event.bind(store);
+  let failures = 1;
+  store.event = (event: any, maxEvents: number) => {
+    if (event.type === "prompt.steer_pending" && failures > 0) { failures--; throw new Error("injected pending event write failure"); }
+    return originalEvent(event, maxEvents);
+  };
+  const operation = await prompt(client, root.id, "sleep:350");
+  await until(async () => (await client.request<Operation>("operation.get", { operationId: operation.id })).status === "running");
+  const receipt = await client.request<any>("agent.steer", { agentId: root.id, operationId: operation.id, text: "pending-write-retry" });
+  expect((await client.wait(operation)).status).toBe("completed");
+  await until(() => server.organization.store.history(0, 1000).events.some(event => event.type === "prompt.steer_delivered" && (event.data as any).steeringId === receipt.steeringId));
+  const lifecycle = server.organization.store.history(0, 1000).events.filter(event => (event.data as any).steeringId === receipt.steeringId);
+  expect(lifecycle.map(event => event.type)).toEqual(["prompt.steer_submitted", "prompt.steer_pending", "prompt.steer_delivered"]);
+  expect(new Set(lifecycle.map(event => event.type)).size).toBe(3);
+  expect(failures).toBe(0);
+});
+
+test("terminal steering event write retries exactly once after pending", async () => {
+  const { client, server } = await setup();
+  const root = await create(client);
+  const store = server.organization.store as any;
+  const originalEvent = store.event.bind(store);
+  let failures = 1;
+  store.event = (event: any, maxEvents: number) => {
+    if (event.type === "prompt.steer_delivered" && failures > 0) { failures--; throw new Error("injected terminal event write failure"); }
+    return originalEvent(event, maxEvents);
+  };
+  const operation = await prompt(client, root.id, "sleep:350");
+  await until(async () => (await client.request<Operation>("operation.get", { operationId: operation.id })).status === "running");
+  const receipt = await client.request<any>("agent.steer", { agentId: root.id, operationId: operation.id, text: "terminal-write-retry" });
+  expect((await client.wait(operation)).status).toBe("completed");
+  await until(() => server.organization.store.history(0, 1000).events.some(event => event.type === "prompt.steer_delivered" && (event.data as any).steeringId === receipt.steeringId));
+  const lifecycle = server.organization.store.history(0, 1000).events.filter(event => (event.data as any).steeringId === receipt.steeringId);
+  expect(lifecycle.map(event => event.type)).toEqual(["prompt.steer_submitted", "prompt.steer_pending", "prompt.steer_delivered"]);
+  expect(new Set(lifecycle.map(event => event.type)).size).toBe(3);
+  expect(failures).toBe(0);
+});
+
+test("shutdown drains a failed pending steering event before closing the store", async () => {
+  const { dir, client, server } = await setup();
+  const root = await create(client);
+  const store = server.organization.store as any;
+  const originalEvent = store.event.bind(store);
+  let failures = 1;
+  store.event = (event: any, maxEvents: number) => {
+    if (event.type === "prompt.steer_pending" && failures > 0) { failures--; throw new Error("injected pending event write failure"); }
+    return originalEvent(event, maxEvents);
+  };
+  const operation = await prompt(client, root.id, "sleep:1000");
+  await until(async () => (await client.request<Operation>("operation.get", { operationId: operation.id })).status === "running");
+  const receipt = await client.request<any>("agent.steer", { agentId: root.id, operationId: operation.id, text: "shutdown-pending-retry" });
+  await until(() => failures === 0);
+  await server.close();
+  const reopened = await OrganizationServer.start({ dataDir: dir, socketPath: join(dir, "server.sock"), plugins: [fixture], recover: false });
+  servers.push(reopened);
+  const lifecycle = reopened.organization.store.history(0, 1000).events.filter(event => (event.data as any).steeringId === receipt.steeringId);
+  expect(lifecycle.map(event => event.type)).toEqual(["prompt.steer_submitted", "prompt.steer_pending", "prompt.steer_failed"]);
+  expect(new Set(lifecycle.map(event => event.type)).size).toBe(3);
+  expect(failures).toBe(0);
+});
+
+test("shutdown drains a failed terminal steering event before closing the store", async () => {
+  const { dir, client, server } = await setup();
+  const root = await create(client);
+  const store = server.organization.store as any;
+  const originalEvent = store.event.bind(store);
+  let failures = 1;
+  store.event = (event: any, maxEvents: number) => {
+    if (event.type === "prompt.steer_delivered" && failures > 0) { failures--; throw new Error("injected terminal event write failure"); }
+    return originalEvent(event, maxEvents);
+  };
+  const operation = await prompt(client, root.id, "sleep:1000");
+  await until(async () => (await client.request<Operation>("operation.get", { operationId: operation.id })).status === "running");
+  const receipt = await client.request<any>("agent.steer", { agentId: root.id, operationId: operation.id, text: "shutdown-terminal-retry" });
+  await until(() => failures === 0);
+  await server.close();
+  const reopened = await OrganizationServer.start({ dataDir: dir, socketPath: join(dir, "server.sock"), plugins: [fixture], recover: false });
+  servers.push(reopened);
+  const lifecycle = reopened.organization.store.history(0, 1000).events.filter(event => (event.data as any).steeringId === receipt.steeringId);
+  expect(lifecycle.map(event => event.type)).toEqual(["prompt.steer_submitted", "prompt.steer_pending", "prompt.steer_delivered"]);
+  expect(new Set(lifecycle.map(event => event.type)).size).toBe(3);
+  expect(failures).toBe(0);
+});
+
+test("persistent steering event failure rejects bounded shutdown and retries successfully after recovery", async () => {
+  const { dir, client, server } = await setup();
+  const root = await create(client);
+  const store = server.organization.store as any;
+  const originalEvent = store.event.bind(store);
+  let failures = 0;
+  store.event = (event: any, maxEvents: number) => {
+    if (["prompt.steer_pending", "prompt.steer_failed"].includes(event.type)) { failures++; throw new Error("persistent injected steering event write failure"); }
+    return originalEvent(event, maxEvents);
+  };
+  const operation = await prompt(client, root.id, "sleep:1000");
+  await until(async () => (await client.request<Operation>("operation.get", { operationId: operation.id })).status === "running");
+  const receipt = await client.request<any>("agent.steer", { agentId: root.id, operationId: operation.id, text: "shutdown-persistent-retry" });
+  await until(() => failures > 0);
+  const started = Date.now();
+  await expect(server.close()).rejects.toMatchObject({ code: "STEERING_DRAIN_FAILED" });
+  expect(Date.now() - started).toBeLessThan(2000);
+  expect(store.history(0, 1000).events.some((event: any) => (event.data as any).steeringId === receipt.steeringId && event.type === "prompt.steer_submitted")).toBe(true);
+
+  store.event = originalEvent;
+  await server.close();
+  const reopened = await OrganizationServer.start({ dataDir: dir, socketPath: join(dir, "server.sock"), plugins: [fixture], recover: false });
+  servers.push(reopened);
+  const lifecycle = reopened.organization.store.history(0, 1000).events.filter(event => (event.data as any).steeringId === receipt.steeringId);
+  expect(lifecycle.map(event => event.type)).toEqual(["prompt.steer_submitted", "prompt.steer_pending", "prompt.steer_failed"]);
+  expect(new Set(lifecycle.map(event => event.type)).size).toBe(3);
+  expect(failures).toBeGreaterThan(1);
 });
 
 test("prompt FIFO/global limit, supersession, cancel acknowledgement and brief waits", async () => {
