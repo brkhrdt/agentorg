@@ -897,6 +897,7 @@ export class Organization implements PluginHost {
     const a = this.agent(agentId), rt = this.runtimes.get(a.id);
     if (!rt || ["stopped", "failed", "starting"].includes(a.state)) throw new ApiError("NOT_RUNNING", "Agent is not available");
     if (queue && rt.queue.length >= this.limits.maxQueuedPrompts) throw new ApiError("LIMIT", "Prompt queue limit reached");
+    const effect = queue ? "queue" : rt.active || rt.queue.length ? "interrupt" : "normal";
     const parentRuntime = downward && caller.kind === "agent" ? this.runtimes.get(caller.id) : undefined;
     const parentAgent = downward && caller.kind === "agent" ? this.agents.get(caller.id) : undefined;
     const parentOperation = parentRuntime?.active?.op;
@@ -929,7 +930,7 @@ export class Organization implements PluginHost {
     }
     rt.queue.push(op);
     if (!rt.active) this.state(a, "waiting");
-    this.emit("prompt.queued", { operationId: op.id, text: effectiveText, ...(promptCue ? { promptCue } : {}) }, a.id, rt.generation);
+    this.emit("prompt.queued", { operationId: op.id, text: effectiveText, effect, ...(promptCue ? { promptCue } : {}) }, a.id, rt.generation);
     return structuredClone(op);
   }
   async request(

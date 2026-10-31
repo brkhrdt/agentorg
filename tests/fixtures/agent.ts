@@ -99,6 +99,15 @@ acp
     }
     // This fake harness recognizes the fixture's single-token issuer names; production adapters never strip the core cue.
     const text = incomingText.replace(/^@[^ ]+ /, "");
+    if (process.env.PROMPT_ORDER_FILE) appendFileSync(process.env.PROMPT_ORDER_FILE, `${text}\n`);
+    if (text.startsWith("barrier:") && process.env.PROMPT_BARRIER_DIR) {
+      const name = text.slice("barrier:".length);
+      writeFileSync(join(process.env.PROMPT_BARRIER_DIR, `${name}.started`), "started");
+      while (!existsSync(join(process.env.PROMPT_BARRIER_DIR, `${name}.release`))) {
+        if (cancelled && !process.env.IGNORE_CANCEL) break;
+        await delay(5);
+      }
+    }
     if (text === "sibling-barrier" && process.env.SIBLING_BARRIER_DIR) {
       writeFileSync(join(process.env.SIBLING_BARRIER_DIR, "sibling.started"), "started");
       while (!existsSync(join(process.env.SIBLING_BARRIER_DIR, "sibling.release"))) await delay(10);

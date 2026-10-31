@@ -1,5 +1,5 @@
 import { test, expect, afterEach } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createConnection } from "node:net";
@@ -368,6 +368,86 @@ test("persistent steering event failure rejects bounded shutdown and retries suc
   expect(lifecycle.map(event => event.type)).toEqual(["prompt.steer_submitted", "prompt.steer_pending", "prompt.steer_failed"]);
   expect(new Set(lifecycle.map(event => event.type)).size).toBe(3);
   expect(failures).toBeGreaterThan(1);
+});
+
+test("queue:true runs every accepted successor in FIFO order", async () => {
+  const { dir, client } = await setup();
+  const barrierDir = join(dir, "prompt-barriers"), orderFile = join(dir, "prompt-order.txt");
+  mkdirSync(barrierDir, { recursive: true });
+  const root = await create(client, null, { PROMPT_BARRIER_DIR: barrierDir, PROMPT_ORDER_FILE: orderFile });
+  const first = await prompt(client, root.id, "barrier:first");
+  await until(() => existsSync(join(barrierDir, "first.started")));
+  const second = await prompt(client, root.id, "barrier:second", true);
+  const third = await prompt(client, root.id, "barrier:third", true);
+  const fourth = await prompt(client, root.id, "barrier:fourth", true);
+  expect([second.status, third.status, fourth.status]).toEqual(["queued", "queued", "queued"]);
+  expect(new Set([first.id, second.id, third.id, fourth.id]).size).toBe(4);
+  expect(await client.request<Operation>("operation.get", { operationId: first.id })).toMatchObject({ status: "running" });
+  expect((await client.request<Operation>("operation.get", { operationId: first.id })).cancelRequested).not.toBe(true);
+  expect(readFileSync(orderFile, "utf8").trim().split("\n")).toEqual(["barrier:first"]);
+  for (const [name, operation, next] of [["first", first, "second"], ["second", second, "third"], ["third", third, "fourth"]] as const) {
+    writeFileSync(join(barrierDir, `${name}.release`), "release");
+    await until(() => existsSync(join(barrierDir, `${next}.started`)));
+    expect(readFileSync(orderFile, "utf8").trim().split("\n")).toEqual([
+      "barrier:first", "barrier:second", "barrier:third", "barrier:fourth",
+    ].slice(0, ["first", "second", "third", "fourth"].indexOf(next) + 1));
+  }
+  writeFileSync(join(barrierDir, "fourth.release"), "release");
+  for (const operation of [first, second, third, fourth]) expect((await client.wait(operation)).status).toBe("completed");
+});
+
+test("queue:false supersedes the whole backlog and waits for cooperative cancellation to settle", async () => {
+  const { dir, client, server } = await setup();
+  const barrierDir = join(dir, "prompt-barriers"), orderFile = join(dir, "prompt-order.txt");
+  mkdirSync(barrierDir, { recursive: true });
+  const root = await create(client, null, { PROMPT_BARRIER_DIR: barrierDir, PROMPT_ORDER_FILE: orderFile, IGNORE_CANCEL: "1" });
+  const beforeAgent = await client.request<AgentRecord>("agent.get", { agentId: root.id });
+  const active = await prompt(client, root.id, "barrier:active");
+  await until(() => existsSync(join(barrierDir, "active.started")));
+  const oldOne = await prompt(client, root.id, "never-start-one", true);
+  const oldTwo = await prompt(client, root.id, "never-start-two", true);
+  const replacement = await prompt(client, root.id, "barrier:replacement", false);
+  const eventFor = (operation: Operation) => server.organization.store.history(0, 1000).events.find(event => event.type === "prompt.queued" && (event.data as any).operationId === operation.id);
+  expect((eventFor(active)?.data as any).effect).toBe("normal");
+  expect((eventFor(oldOne)?.data as any).effect).toBe("queue");
+  expect((eventFor(oldTwo)?.data as any).effect).toBe("queue");
+  expect((eventFor(replacement)?.data as any).effect).toBe("interrupt");
+  expect((await client.request<Operation>("operation.get", { operationId: active.id })).cancelRequested).toBe(true);
+  expect((await client.request<Operation>("operation.get", { operationId: oldOne.id })).status).toBe("stopped");
+  expect((await client.request<Operation>("operation.get", { operationId: oldTwo.id })).status).toBe("stopped");
+  expect((await client.request<Operation>("operation.get", { operationId: replacement.id })).status).toBe("queued");
+  expect(readFileSync(orderFile, "utf8").trim().split("\n")).toEqual(["barrier:active"]);
+  writeFileSync(join(barrierDir, "active.release"), "release");
+  await until(() => existsSync(join(barrierDir, "replacement.started")));
+  expect(readFileSync(orderFile, "utf8").trim().split("\n")).toEqual(["barrier:active", "barrier:replacement"]);
+  writeFileSync(join(barrierDir, "replacement.release"), "release");
+  expect((await client.wait(active)).status).toBe("stopped");
+  expect((await client.wait(replacement)).status).toBe("completed");
+  const afterAgent = await client.request<AgentRecord>("agent.get", { agentId: root.id });
+  expect(afterAgent).toMatchObject({ sessionId: beforeAgent.sessionId, generation: beforeAgent.generation, state: "idle" });
+});
+
+test("no-active-but-globally-backlogged queue:true appends and queue:false replaces only that recipient", async () => {
+  const { dir, client } = await setup({ maxPrompts: 1 });
+  const barrierDir = join(dir, "prompt-barriers"), orderFile = join(dir, "prompt-order.txt");
+  mkdirSync(barrierDir, { recursive: true });
+  const blocker = await create(client, null, { PROMPT_BARRIER_DIR: barrierDir, PROMPT_ORDER_FILE: orderFile });
+  const target = await create(client, blocker.id, { PROMPT_BARRIER_DIR: barrierDir, PROMPT_ORDER_FILE: orderFile });
+  const occupying = await prompt(client, blocker.id, "barrier:other-agent");
+  await until(() => existsSync(join(barrierDir, "other-agent.started")));
+  const oldOne = await prompt(client, target.id, "target-old-one", true);
+  const oldTwo = await prompt(client, target.id, "target-old-two", true);
+  const replacement = await prompt(client, target.id, "barrier:target-new", false);
+  expect((await client.request<Operation>("operation.get", { operationId: oldOne.id })).status).toBe("stopped");
+  expect((await client.request<Operation>("operation.get", { operationId: oldTwo.id })).status).toBe("stopped");
+  expect((await client.request<Operation>("operation.get", { operationId: replacement.id })).status).toBe("queued");
+  expect((await client.request<Operation>("operation.get", { operationId: occupying.id })).status).toBe("running");
+  writeFileSync(join(barrierDir, "other-agent.release"), "release");
+  await until(() => existsSync(join(barrierDir, "target-new.started")));
+  expect(readFileSync(orderFile, "utf8").trim().split("\n")).toEqual(["barrier:other-agent", "barrier:target-new"]);
+  writeFileSync(join(barrierDir, "target-new.release"), "release");
+  expect((await client.wait(occupying)).status).toBe("completed");
+  expect((await client.wait(replacement)).status).toBe("completed");
 });
 
 test("prompt FIFO/global limit, supersession, cancel acknowledgement and brief waits", async () => {
