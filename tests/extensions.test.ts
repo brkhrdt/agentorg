@@ -31,6 +31,61 @@ test("strict built-ins and generic extension patches", () => {
   expect(() => settingsSchema.parse({ ...settings, unknown: true })).toThrow();
 });
 
+test("transparent extension grant arrays survive cwd-only and name-only lifecycle updates", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "extension-grant-preservation-"));
+  const org = new Organization(join(dir, "server.sock"), dir);
+  try {
+    org.registerHarness({ name: "fixture", launch: () => ({ command: process.execPath, args: [join(import.meta.dir, "fixtures/agent.ts")] }) });
+    org.registerSettings({ namespace: "podman", validate: value => value });
+    org.registerSettings({ namespace: "sibling", validate: value => value });
+    const initial = {
+      id: "grant-agent", parentId: null, name: "before", metadata: {},
+      settings: { ...settings, cwd: "/before", extensions: {
+        podman: {
+          image: "fixture:v1", profile: { id: "profile" }, runtime: { network: "none" },
+          configGrants: { readOnlyDirs: ["/configured-ro"], readWriteDirs: ["/configured-rw"], readOnlyVolumes: ["configured-ro"], readWriteVolumes: ["configured-rw"] },
+          readOnlyDirs: ["/extra-ro"], readWriteDirs: ["/extra-rw"], readOnlyVolumes: ["extra-ro"], readWriteVolumes: ["extra-rw"],
+        }, sibling: { retained: true },
+      } },
+      state: "stopped", revision: 4, generation: null, sessionId: "session", sessionNumber: 1,
+      removedAt: null, createdAt: "now", updatedAt: "now",
+    } as unknown as AgentRecord;
+    org.agents.set(initial.id, initial); org.store.saveAgent(initial);
+    await org.initialize();
+    const run = async (params: unknown) => {
+      const accepted = await org.request("agent.modify", params) as Operation;
+      for (let n = 0; n < 200; n++) {
+        const op = await org.request("operation.wait", { operationId: accepted.id, waitMs: 50 }) as Operation;
+        if (["completed", "failed", "stopped"].includes(op.status)) return op;
+      }
+      throw new Error("operation timed out");
+    };
+    const first = await run({ agentId: initial.id, expectedRevision: 4, settings: { cwd: "/after" } });
+    expect(first.status).toBe("completed");
+    const returned = first.result as AgentRecord;
+    const grants = returned.settings.extensions!.podman as Record<string, any>;
+    expect(returned.revision).toBe(5);
+    expect(returned.settings.cwd).toBe("/after");
+    expect(grants).toMatchObject({ readOnlyDirs: ["/extra-ro"], readWriteDirs: ["/extra-rw"], readOnlyVolumes: ["extra-ro"], readWriteVolumes: ["extra-rw"],
+      configGrants: { readOnlyDirs: ["/configured-ro"], readWriteDirs: ["/configured-rw"], readOnlyVolumes: ["configured-ro"], readWriteVolumes: ["configured-rw"] },
+      image: "fixture:v1", profile: { id: "profile" }, runtime: { network: "none" } });
+    expect(returned.settings.extensions!.sibling).toEqual({ retained: true });
+    expect(org.store.agents().find(agent => agent.id === initial.id)).toEqual(returned);
+
+    const second = await run({ agentId: initial.id, expectedRevision: 5, name: "renamed" });
+    expect(second.status).toBe("completed");
+    const renamed = second.result as AgentRecord;
+    expect(renamed.revision).toBe(6);
+    expect(renamed.name).toBe("renamed");
+    expect(renamed.settings.extensions!.podman).toEqual(grants);
+    expect(org.store.agents().find(agent => agent.id === initial.id)).toEqual(renamed);
+    const conflict = await run({ agentId: initial.id, expectedRevision: 5, settings: { cwd: "/stale" } });
+    expect(conflict.status).toBe("failed");
+    expect(conflict.error?.code).toBe("CONFLICT");
+    expect(org.store.agents().find(agent => agent.id === initial.id)).toEqual(renamed);
+  } finally { await org.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("generic participant atomic related updates, compensation, finalize and nested request protection", async () => {
   const dir = mkdtempSync(join(tmpdir(), "extension-host-"));
   const org = new Organization(join(dir, "server.sock"), dir, { stopTimeoutMs: 100, killTimeoutMs: 50 });
