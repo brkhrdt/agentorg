@@ -112,6 +112,36 @@ async function until(predicate: () => boolean | Promise<boolean>, ms = 2000) {
   }
 }
 
+test("spawned agents can read dataDir files from overlapping workspaces on create and restart", async () => {
+  for (const mode of ["equal", "inside", "contains"] as const) {
+    const root = mkdtempSync(join(tmpdir(), `org-data-dir-access-${mode}-`));
+    dirs.push(root);
+    const dataDir = mode === "equal" ? join(root, ".org")
+      : mode === "inside" ? join(root, ".org") : join(root, "workspace", ".org");
+    const cwd = mode === "equal" ? dataDir
+      : mode === "inside" ? join(dataDir, "workspace") : join(root, "workspace");
+    mkdirSync(dataDir, { recursive: true }); mkdirSync(cwd, { recursive: true });
+    const sentinel = join(dataDir, "access-sentinel.txt"), proof = join(root, "access-proof.jsonl");
+    writeFileSync(sentinel, `readable:${mode}`);
+    const socketPath = join(root, "org.sock");
+    const server = await OrganizationServer.start({ dataDir, socketPath, plugins: [fixture] });
+    servers.push(server);
+    const client = await OrganizationClient.connect(socketPath); clients.push(client);
+    const created = await client.wait(await client.request<Operation>("agent.create", { settings: { harness: "fixture", model: "gpt-6-luna", cwd, env: { PATH_ACCESS_PROBE: JSON.stringify([sentinel]), PATH_ACCESS_PROOF: proof } } }));
+    expect(created.status).toBe("completed");
+    const agent = await client.request<AgentRecord>("agent.get", { agentId: created.agentId });
+    for (const launch of ["created", "restarted"]) {
+      if (launch === "restarted") expect((await mutate(client, "agent.restart", agent.id)).status).toBe("completed");
+      const operation = await client.request<Operation>("agent.prompt", { agentId: agent.id, text: `read-${launch}` });
+      expect((await client.wait(operation)).status).toBe("completed");
+    }
+    const records = readFileSync(proof, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    expect(records).toHaveLength(2);
+    expect(records.map((record) => record.cwd)).toEqual([cwd, cwd]);
+    expect(records.map((record) => record.values[0].content)).toEqual([`readable:${mode}`, `readable:${mode}`]);
+  }
+});
+
 test("LF framing preserves split UTF-8, CRLF and Unicode separators; bounds records", () => {
   const values: string[] = [];
   const lines = new JsonLines(100, (line) =>
