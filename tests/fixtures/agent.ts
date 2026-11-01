@@ -2,7 +2,7 @@ import * as acp from "@agentclientprotocol/sdk";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { Readable, Writable } from "node:stream";
-import { appendFileSync, existsSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { OrganizationClient } from "../../src/client.ts";
 import { STEERING_EXTENSION, STEERING_METHOD, STEERING_STATUS_METHOD, STEERING_VERSION } from "../../src/steering-contract.ts";
@@ -83,6 +83,11 @@ acp
       .map((b) => (b.type === "text" ? b.text : ""))
       .join("");
     if (process.env.PROMPT_CAPTURE_FILE) appendFileSync(process.env.PROMPT_CAPTURE_FILE, `${JSON.stringify({ sessionId, text: incomingText })}\n`);
+    if (process.env.PATH_ACCESS_PROBE) {
+      const paths = JSON.parse(process.env.PATH_ACCESS_PROBE) as string[];
+      const values = paths.map((path) => ({ path, content: readFileSync(path, "utf8") }));
+      appendFileSync(process.env.PATH_ACCESS_PROOF!, `${JSON.stringify({ cwd: process.cwd(), values })}\n`);
+    }
     const completion = incomingText.match(/\n(\{.*\})$/s)?.[1];
     if (completion) {
       let batchId: string | undefined;
