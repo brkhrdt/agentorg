@@ -226,18 +226,7 @@ acp
         metrics: { "tokens.input": -1, invalid: 42 },
       });
     }
-    if (text === "tui-parent-render-check") {
-      const toolCallId = crypto.randomUUID();
-      await ctx.client.notify("session/update", { sessionId, update: {
-        sessionUpdate: "tool_call", toolCallId, title: "mcp__agentorg__prompt_parent", toolName: "mcp__agentorg__prompt_parent",
-        status: "pending", rawInput: { text: "TUI parent renderer marker" },
-      } });
-      await ctx.client.notify("session/update", { sessionId, update: {
-        sessionUpdate: "tool_call_update", toolCallId, title: "mcp__agentorg__prompt_parent", toolName: "mcp__agentorg__prompt_parent",
-        status: "completed", rawOutput: { content: [{ type: "text", text: JSON.stringify({ id: "probe-operation", status: "queued" }) }], isError: false },
-      } });
-    } else {
-      await ctx.client.notify("session/update", {
+    await ctx.client.notify("session/update", {
         sessionId,
         update: {
           sessionUpdate: "tool_call",
@@ -247,7 +236,6 @@ acp
           rawOutput: { ok: true },
         },
       });
-    }
     await ctx.client.notify("session/update", {
       sessionId,
       update: {

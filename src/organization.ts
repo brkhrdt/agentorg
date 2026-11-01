@@ -390,12 +390,9 @@ export class Organization implements PluginHost {
     const operationAgent = operation?.agentId ? this.agents.get(operation.agentId) : undefined;
     const emittedTool = toolIdentity(presentation);
     const canonicalTool = this.renderers.canonicalTool(harness, emittedTool);
-    const parent = event.agentId ? this.agents.get(event.agentId)?.parentId : undefined;
-    const parentName = parent ? this.agents.get(parent)?.name : undefined;
     // Display-only context; never rewrite received event inputs or results.
     return this.renderers.render(presentation, harness, String(this.serverSettings("rendering").defaultToolRenderer), {
       targetName: recipient?.name ?? operationAgent?.name,
-      parentTargetName: canonicalTool === "prompt_parent" ? parentName : undefined,
       senderName: event.agentId ? this.agents.get(event.agentId)?.name : undefined,
     });
   }
@@ -1058,7 +1055,7 @@ export class Organization implements PluginHost {
     caller: Caller = { kind: "server", id: "server" },
     authenticatedAgent?: AuthenticatedAgentContext,
   ): Promise<unknown> {
-    if (this.mutationContext.getStore() && /^(agent\.(create|modify|stop|restart|restart_subtree|replace_session|remove|prompt|prompt_parent|steer)|operation\.(wait|cancel)|organization\.settings\.update)$/.test(method))
+    if (this.mutationContext.getStore() && /^(agent\.(create|modify|stop|restart|restart_subtree|replace_session|remove|prompt|steer)|operation\.(wait|cancel)|organization\.settings\.update)$/.test(method))
       throw new ApiError("NESTED_MUTATION", "Lifecycle hooks cannot enqueue or wait for mutations");
     if (this.closing)
       throw new ApiError("SHUTTING_DOWN", "Server is shutting down");
@@ -1509,19 +1506,6 @@ export class Organization implements PluginHost {
         if ("failure" in accepted) throw accepted.failure;
         void this.dispatchSteering(p.agentId, accepted.generation, accepted.process, accepted.record);
         return { agentId: p.agentId, operationId: p.operationId, steeringId, disposition: "submitted" as const };
-      }
-      case "agent.prompt_parent": {
-        const p = z.object({ text: z.string().min(1), queue: z.boolean().default(true) }).strict().parse(params);
-        if (caller.kind !== "agent") throw new ApiError("FORBIDDEN", "Only agents may prompt their parent");
-        return this.serialize(() => {
-          this.validatePromptCapability(caller, authenticatedAgent);
-          const source = this.agents.get(caller.id);
-          if (!source) throw new ApiError("NOT_FOUND", "Agent not found");
-          if (!source.parentId) throw new ApiError("NO_PARENT", "Root agent has no parent");
-          const parent = this.agents.get(source.parentId);
-          if (!parent) throw new ApiError("NOT_FOUND", "Parent agent not found");
-          return this.admitPromptLocked(parent.id, p.text, p.queue, caller, false);
-        });
       }
       case "completion.get": {
         const p = z.object({ batchId: z.string(), after: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(100).default(25) }).strict().parse(params);
@@ -2221,13 +2205,6 @@ export class Organization implements PluginHost {
       "Prompt an immediate child only; relay through children for deeper work. If called by an active agent prompt, accepted downward work may be enrolled in that prompt's completion batch. Default supersedes active/queued work; queue=true appends FIFO. Returns immediately with the operation ID. Prefer fire-and-return to avoid prompt-slot deadlocks.",
       { agentId: id, text: id, queue: { type: "boolean" } },
       ["agentId", "text"],
-    );
-    add(
-      "prompt_parent",
-      "agent.prompt_parent",
-      "Use only when explicitly instructed to prompt or report to your parent; do not send unsolicited parent updates. Targets your implicit direct parent; no target ID is accepted. Defaults to queueing (queue=false explicitly supersedes). Root agents receive NO_PARENT. Send and return rather than waiting on a parent that may be waiting for you. Deeper reporting must relay one adjacent hop at a time.",
-      { text: id, queue: { type: "boolean" } },
-      ["text"],
     );
     add(
       "get_subagent",
