@@ -625,11 +625,10 @@ test("MCP SDK bridge enforces direct-child creation and subtree permissions", as
   try {
     expect((server.organization as any).mcpServers(rt.token)[0].name).toBe("agentorg");
     const listedTools = (await mcp.listTools()).tools;
-    expect(listedTools.find((tool) => tool.name === "prompt_parent")?.description).toContain("only when explicitly instructed");
+    expect(listedTools.some((tool) => tool.name === "prompt_parent")).toBe(false);
     expect(listedTools.map((tool) => tool.name)).toEqual([
       "create_subagent",
       "prompt_subagent",
-      "prompt_parent",
       "get_subagent",
       "usage_get",
       "snapshot_organization",
@@ -1258,12 +1257,9 @@ test("adjacent prompt directions resolve targets server-side and snapshots expos
   expect(snapshot).toEqual({ parent: { agentId: child.id, name: child.name }, subagents: [] });
   expect(snapshot).not.toHaveProperty("parentId");
   await expect(server.organization.request("agent.prompt", { agentId: grandchild.id, text: "skip" }, { kind: "agent", id: root.id })).rejects.toMatchObject({ code: "FORBIDDEN" });
-  await expect(server.organization.request("agent.prompt_parent", { text: "spoof", agentId: root.id }, { kind: "agent", id: grandchild.id })).rejects.toThrow();
-  const upward = await server.organization.request("agent.prompt_parent", { text: "upward marker" }, { kind: "agent", id: grandchild.id }) as Operation;
-  expect(upward).toMatchObject({ type: "agent.prompt", agentId: child.id, caller: { kind: "agent", id: grandchild.id }, input: { agentId: child.id, text: `@${grandchild.name} upward marker`, queue: true } });
-  expect(upward.promptProvenance).toBeUndefined();
-  await expect(server.organization.request("agent.prompt_parent", { text: "root" }, { kind: "agent", id: root.id })).rejects.toMatchObject({ code: "NO_PARENT" });
-  await client.wait(upward);
+  const operationsBefore = server.organization.operations.size;
+  await expect(server.organization.request("agent.prompt_parent", { text: "upward marker" }, { kind: "agent", id: grandchild.id })).rejects.toMatchObject({ code: "METHOD_NOT_FOUND" });
+  expect(server.organization.operations.size).toBe(operationsBefore);
 });
 
 test("real agent capabilities enforce adjacent prompt relay and scoped snapshots", async () => {
@@ -1288,9 +1284,9 @@ test("real agent capabilities enforce adjacent prompt relay and scoped snapshots
     expect(relay.isError).not.toBe(true);
     const downRelay = JSON.parse(relay.content[0].text);
     expect(downRelay).toMatchObject({ agentId: grandchild.id, caller: { kind: "agent", id: child.id } });
-    const up = await grandchildCap.request<any>("mcp.call", { name: "prompt_parent", arguments: { text: "grandchild-report" } });
-    expect(up.isError).not.toBe(true);
-    expect(JSON.parse(up.content[0].text)).toMatchObject({ agentId: child.id, caller: { kind: "agent", id: grandchild.id }, input: { agentId: child.id, text: `@${grandchild.name} grandchild-report`, queue: true } });
+    const operationsBefore = org.operations.size;
+    await expect(grandchildCap.request<any>("mcp.call", { name: "prompt_parent", arguments: { text: "grandchild-report" } })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(org.operations.size).toBe(operationsBefore);
   } finally { rootCap.close(); childCap.close(); grandchildCap.close(); }
 });
 

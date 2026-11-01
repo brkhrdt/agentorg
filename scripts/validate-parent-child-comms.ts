@@ -35,20 +35,21 @@ try {
   const rawDenied = await r.request<any>("agent.prompt", { agentId: grandchild.id, text: "raw-forbidden-skip" }).then(() => false, (error: any) => error.code === "FORBIDDEN");
   check(rawDenied, "R→G raw API prompt was not denied");
   const snapC = await c.request<any>("organization.snapshot", {}), snapG = await g.request<any>("organization.snapshot", {});
-  for (const snapshot of [snapC, snapG]) check([root.id, child.id, grandchild.id, sibling.id].every(id => snapshot.agents.some((agent: AgentRecord) => agent.id === id)), "agent snapshot did not expose full tree");
+  check(snapC.parent?.agentId === root.id && snapC.subagents.some((agent: any) => agent.agentId === grandchild.id), "child snapshot did not expose only its parent and child");
+  check(snapG.parent?.agentId === child.id && snapG.subagents.length === 0, "grandchild snapshot did not expose only its parent and no children");
   const relay = operation(await call(c, "prompt_subagent", { agentId: grandchild.id, text: "relay-unique-marker", queue: true }), "C→G");
   check(relay.agentId === grandchild.id && relay.caller?.id === child.id, "relay caller/target mismatch");
-  const gUp = operation(await call(g, "prompt_parent", { text: "grandchild-up-marker" }), "G→C");
-  check(gUp.agentId === child.id && gUp.caller?.id === grandchild.id && (gUp.input as any)?.queue === true, "G→C resolution/attribution/default mismatch");
-  const cUp = operation(await call(c, "prompt_parent", { text: "child-up-marker" }), "C→R");
-  check(cUp.agentId === root.id && cUp.caller?.id === child.id, "C→R resolution/attribution mismatch");
-  const spoof = await call(g, "prompt_parent", { text: "spoof", agentId: root.id });
-  check(spoof.isError === true && spoof.content?.[0]?.text.includes("INVALID_PARAMS"), "prompt_parent accepted a caller-selected target");
+  const rejectedParentTool = async (client: OrganizationClient, args: Record<string, unknown>) => {
+    try { await call(client, "prompt_parent", args); return false; }
+    catch (error: any) { return error.code === "NOT_FOUND"; }
+  };
+  check(await rejectedParentTool(g, { text: "grandchild-up-marker" }), "removed parent MCP tool was not rejected as NOT_FOUND");
+  check(await rejectedParentTool(c, { text: "child-up-marker" }), "removed parent MCP tool was not rejected as NOT_FOUND");
+  check(await rejectedParentTool(g, { text: "spoof", agentId: root.id }), "removed parent MCP tool accepted caller-selected target");
   const operatorPrompt = await operator.request<Operation>("agent.prompt", { agentId: grandchild.id, text: "trusted-operator-grandchild", queue: true });
   check(operatorPrompt.agentId === grandchild.id && operatorPrompt.caller.kind === "client", "trusted operator lost unrestricted target control");
   const receipts = [
     [r, direct, child.id, "direct-child-marker"], [c, relay, grandchild.id, "relay-unique-marker"],
-    [g, gUp, child.id, "grandchild-up-marker"], [c, cUp, root.id, "child-up-marker"],
   ] as const;
   for (const [issuer, op, recipientId, marker] of receipts) {
     const settled = await issuer.wait(op, 15_000);
@@ -63,7 +64,5 @@ try {
   check(grandchildHistory.events.some((event: any) => JSON.stringify(event).includes("trusted-operator-grandchild")), "grandchild did not receive operator marker");
   const tuiParentPrompt = await operator.request<Operation>("agent.prompt", { agentId: child.id, text: "tui-parent-render-check", queue: true });
   check((await operator.wait(tuiParentPrompt, 15_000)).status === "completed", "TUI parent-render fixture prompt did not complete");
-  const childHistory = await operator.request<any>("events.history", { agentId: child.id });
-  check(childHistory.events.some((event: any) => event.type === "tool.call" && (event.data?.toolName === "mcp__agentorg__prompt_parent" || event.data?.title === "mcp__agentorg__prompt_parent") && event.data?.rawInput?.text === "TUI parent renderer marker"), `parent-render fixture event missing from child history: ${JSON.stringify(childHistory.events)}`);
-  console.log(JSON.stringify({ ok: true, agents: { root: root.id, child: child.id, grandchild: grandchild.id, sibling: sibling.id }, operations: [direct, relay, gUp, cUp, operatorPrompt].map(op => ({ id: op.id, target: op.agentId, caller: op.caller.id, type: op.type })), denied: { mcpGrandchild: true, rawGrandchild: true }, fullTreeSnapshots: true, upwardDefaultQueue: true, operatorGrandchild: true }));
+  console.log(JSON.stringify({ ok: true, agents: { root: root.id, child: child.id, grandchild: grandchild.id, sibling: sibling.id }, operations: [direct, relay, operatorPrompt].map(op => ({ id: op.id, target: op.agentId, caller: op.caller.id, type: op.type })), denied: { mcpGrandchild: true, rawGrandchild: true }, fullTreeSnapshots: true, operatorGrandchild: true }));
 } finally { for (const client of clients) client.close(); operator.close(); }

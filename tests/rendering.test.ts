@@ -105,7 +105,7 @@ test("core native-tool compatibility helpers are generic; harness plugins own st
 
 test("core MCP renderers cover exactly the public tools and preserve stable identity/details", () => {
   const registry = new RendererRegistry();
-  const names = ["create_subagent", "prompt_subagent", "prompt_parent", "get_subagent", "usage_get", "snapshot_organization", "stop_subagent", "restart_subagent", "restart_subagent_subtree", "replace_subagent_session", "remove_subagent", "modify_subagent", "get_completion", "get_operation", "wait_operation", "cancel_operation"];
+  const names = ["create_subagent", "prompt_subagent", "get_subagent", "usage_get", "snapshot_organization", "stop_subagent", "restart_subagent", "restart_subagent_subtree", "replace_subagent_session", "remove_subagent", "modify_subagent", "get_completion", "get_operation", "wait_operation", "cancel_operation"];
   registry.registerHarness("pi", [], canonicalTools => Object.fromEntries(canonicalTools.map(tool => [`mcp__agentorg__${tool}`, tool])));
   registry.validateRegistrations(names);
   const coreCatalog = registry.catalog().filter(r => r.id.startsWith("core.mcp-"));
@@ -123,7 +123,7 @@ test("core MCP renderers cover exactly the public tools and preserve stable iden
     for (const example of aliasExamples ?? []) { expect(example.subtype).toBe(emitted); expect(JSON.parse(example.raw).data.title).toBe(emitted); }
   }
   for (const tool of names) {
-    const input = tool === "prompt_parent" ? { text: "hello" } : tool === "get_completion" ? { batchId: "batch-1", after: 0, limit: 5 } : ["get_operation", "wait_operation", "cancel_operation"].includes(tool) ? { operationId: "op-1" } : tool === "create_subagent" ? { name: "worker", settings: { harness: "pi" } } : { agentId: "worker" };
+    const input = tool === "get_completion" ? { batchId: "batch-1", after: 0, limit: 5 } : ["get_operation", "wait_operation", "cancel_operation"].includes(tool) ? { operationId: "op-1" } : tool === "create_subagent" ? { name: "worker", settings: { harness: "pi" } } : { agentId: "worker" };
     const rendered = registry.render(event("tool.result", { title: tool, status: "completed", rawInput: input, rawOutput: { content: [{ type: "text", text: JSON.stringify({ status: "running", id: "outer-operation" }) }], isError: false } }), undefined, "core.tools")!;
     expect(rendered.rendererId).toContain("core.mcp-"); expect(rendered.subtype).toBe(tool); expect(rendered.summary).not.toContain("✓");
     expect(rendered.full).toContain(`Tool: ${tool.replace(/_/g, "\\_")}`); expect(rendered.full).toContain("Received result:");
@@ -131,9 +131,6 @@ test("core MCP renderers cover exactly the public tools and preserve stable iden
   }
   const prompt = registry.render(event("tool.call", { title: "prompt_subagent", status: "pending", rawInput: { agentId: "child-7", text: "Review this change", queue: true } }), undefined, "core.tools")!;
   expect(prompt.summary).toBe("@child-7 Review this change"); expect(prompt.toolSymbol).toBe("∴"); expect(prompt.toolTarget).toBe("@child-7"); expect(prompt.toolPrompt).toBe("Review this change");
-  const upward = registry.render(event("tool.call", { title: "prompt_parent", status: "pending", rawInput: { text: "Report" } }), undefined, "core.tools", { parentTargetName: "Coordinator" })!;
-  expect(upward.summary).toBe("@Coordinator Report"); expect(upward.toolTarget).toBe("@Coordinator"); expect(upward.toolPrompt).toBe("Report");
-  expect(upward.full).toContain('"text": "Report"'); expect(upward.full).not.toContain('"agentId"');
   const create = registry.render(event("tool.result", { title: "create_subagent", status: "completed", rawInput: { name: "worker" }, rawOutput: { content: [{ type: "text", text: JSON.stringify({ operationId: "op", agentId: "parent" }) }] } }), undefined, "core.tools")!;
   expect(create.summary).toContain("worker"); expect(create.full).not.toContain("Child ID:");
 });
@@ -142,7 +139,6 @@ test("prompt policy presentation reflects each tool's effective queue default an
   const registry = new RendererRegistry();
   for (const [tool, queue, expected] of [
     ["prompt_subagent", undefined, "supersede"], ["prompt_subagent", true, "queue"], ["prompt_subagent", false, "supersede"],
-    ["prompt_parent", undefined, "queue"], ["prompt_parent", true, "queue"], ["prompt_parent", false, "supersede"],
   ] as const) {
     const rawInput = { text: "marker", ...(queue === undefined ? {} : { queue }), ...(tool === "prompt_subagent" ? { agentId: "child" } : {}) };
     const rendering = registry.render(event("tool.call", { title: tool, status: "pending", rawInput }), undefined, "core.tools")!;
@@ -195,14 +191,8 @@ test("real JSONL opt-in presentation and history sidecars preserve envelopes and
     const frames: ServerEvent[] = [], presentations = new Map<number, any>();
     client.onEvent(e => frames.push(e)); client.onPresentation((seq, value) => presentations.set(seq, value));
     await client.request("subscribe", { renderings: true });
-    server.organization.emit("tool.call", { title: "MCP request", toolName: "mcp__pi__prompt_parent", status: "pending", rawInput: { text: "Status update" } }, "agent");
-    await client.request("events.history", {}); // Barrier after live presentation.
-    const parentPrompt = frames.find(e => e.type === "tool.call" && (e.data as any).toolName === "mcp__pi__prompt_parent")!;
-    expect(presentations.get(parentPrompt.seq)).toMatchObject({ canonicalTool: "prompt_parent", toolTarget: "@Coordinator", summary: "@Coordinator Status update" });
     server.organization.emit("tool.result", { title: "read", status: "completed", rawInput: { path: "a.ts" } }, "agent");
     const history = await client.request<any>("events.history", { after: 0, renderings: true });
-    expect(history.renderings[parentPrompt.seq]).toMatchObject({ canonicalTool: "prompt_parent", toolTarget: "@Coordinator", summary: "@Coordinator Status update" });
-    expect(history.events.find((e: ServerEvent) => e.seq === parentPrompt.seq).data).toMatchObject({ title: "MCP request", toolName: "mcp__pi__prompt_parent", rawInput: { text: "Status update" } });
     const received = frames.find(e => e.type === "tool.result")!;
     expect(received).toBeDefined();
     expect(received).not.toHaveProperty("rendering");
@@ -212,6 +202,7 @@ test("real JSONL opt-in presentation and history sidecars preserve envelopes and
     const choices = await client.request<any>("events.renderer-choices");
     expect(choices.choices.map((choice: any) => choice.value)).toEqual(["core.tools", "generic", "server.custom"]);
     const catalog = await client.request<any>("events.renderers");
+    expect(catalog.renderers.some((r: any) => r.tool === "prompt_parent" || r.id.includes("prompt-parent"))).toBe(false);
     expect(catalog.renderers.find((r: any) => r.id === "pi/read").tool).toBe("read");
     const custom = server.organization.renderEvent(event("tool.result", { title: "plugin_custom", rawInput: { value: 1 } }))!;
     expect(custom.rendererId).toBe("plugin.automatic"); expect(custom.summary).toBe("plugin-owned tool");
