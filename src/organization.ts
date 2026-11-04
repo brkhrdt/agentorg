@@ -12,6 +12,7 @@ import { ServerSettingsRegistry, coreSettings, type ServerSettingsDefinition } f
 import { workerArgs } from "./runtime.ts";
 import { completePath } from "./path-completion.ts";
 import { AgentProcess, deadline } from "./process.ts";
+import { normalizeAgentCommands, agentCommandsEqual, type AgentCommand } from "./agent-commands.ts";
 import { metricIdSchema, type UsageMetricDefinition, type UsageNotification, type UsageQuery, type UsageQueryResult } from "./usage.ts";
 import { pluginError, pluginHost, pluginTimeout } from "./plugin-host.ts";
 import type {
@@ -78,6 +79,7 @@ interface Runtime {
   active?: ActivePrompt;
   startRetry?: ReturnType<typeof setTimeout>;
   executionEnvironment?: LaunchContext["executionEnvironment"];
+  commands?: AgentCommand[];
 }
 export interface AuthenticatedAgentContext {
   generation: string;
@@ -1195,6 +1197,7 @@ export class Organization implements PluginHost {
               version: 1, groups: this.serverSettingsRegistry.descriptors(),
               endpoints: { list: "organization.settings.list", get: "organization.settings.get", update: "organization.settings.update" },
             }, rendering: { version: 1, catalog: "events.renderers" }, loadedPlugins: [...this.loadedPlugins],
+            agentCommands: { version: 1 },
             pathCompletion: true,
             harnesses: [...this.harnesses.keys()].sort(),
             modelDiscovery: [...this.harnesses.values()].filter(h => h.listModels).map(h => h.name).sort(),
@@ -1202,6 +1205,11 @@ export class Organization implements PluginHost {
             plugins: structuredClone(this.capabilities),
             settingsEditors: Object.fromEntries([...this.extensionSettings].filter(([, extension]) => extension.ui).map(([namespace, extension]) => [namespace, structuredClone(extension.ui)])),
           },
+          agentCommands: Object.fromEntries([...this.runtimes.entries()].flatMap(([agentId, runtime]) => {
+            const agent = this.agents.get(agentId);
+            return runtime.commands && agent?.generation === runtime.generation && agent.sessionId === runtime.process.sessionId
+              ? [[agentId, { version: 1, generation: runtime.generation, sessionId: runtime.process.sessionId, commands: structuredClone(runtime.commands) }]] : [];
+          })),
           operations: [...this.operations.values()]
             .filter((op) => {
               if (!includeTerminalOperations && terminal(op)) return false;
@@ -1941,6 +1949,14 @@ export class Organization implements PluginHost {
     )
       return;
     const u = notification.update;
+    if (u.sessionUpdate === "available_commands_update") {
+      const commands = normalizeAgentCommands(u.availableCommands);
+      if (!agentCommandsEqual(rt.commands, commands)) {
+        rt.commands = commands;
+        this.emit("agent.commands", { version: 1, generation, sessionId: notification.sessionId, commands }, id, generation);
+      }
+      return;
+    }
     if (
       u.sessionUpdate === "agent_message_chunk" &&
       u.content.type === "text" &&

@@ -80,6 +80,9 @@ export type Caller =
   | { kind: "client"; id: string }
   | { kind: "agent"; id: string }
   | { kind: "server"; id: string };
+export interface AgentCommand { name: string; description: string; input?: { hint: string } }
+export interface AgentCommandsState { version: 1; generation: string; sessionId: string; commands: AgentCommand[] }
+export interface AgentCommandsCapability { version: 1 }
 export interface ServerEvent {
   kind: "event";
   seq: number;

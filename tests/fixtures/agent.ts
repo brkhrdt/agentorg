@@ -58,8 +58,9 @@ acp
       agentCapabilities: { loadSession: true, ...(process.env.STEERING_DISABLED ? {} : { _meta: { [STEERING_EXTENSION]: { version: STEERING_VERSION } } }) },
     };
   })
-  .onRequest("session/new", (ctx) => {
+  .onRequest("session/new", async (ctx) => {
     mcpServers = ctx.params.mcpServers ?? [];
+    if (process.env.COMMANDS_FIXTURE) await ctx.client.notify("session/update", { sessionId, update: { sessionUpdate: "available_commands_update", availableCommands: JSON.parse(process.env.COMMANDS_FIXTURE) } } as any);
     return { sessionId };
   })
   .onRequest(STEERING_METHOD, z.object({ sessionId: z.string(), operationId: z.string(), steeringId: z.string(), text: z.string() }).strict(), (ctx) => {
@@ -70,9 +71,10 @@ acp
     setTimeout(() => { void ctx.client.notify(STEERING_STATUS_METHOD, { sessionId, operationId: p.operationId, steeringId: p.steeringId, status: process.env.STEERING_FAIL ? "failed" : "delivered", ...(process.env.STEERING_FAIL ? { error: { code: "NOT_DELIVERED", message: "fixture did not deliver steering" } } : {}) }); }, Number(process.env.STEERING_DELIVERY_DELAY ?? 15));
     return { operationId: p.operationId, steeringId: p.steeringId, disposition: "pending" };
   })
-  .onRequest("session/load", (ctx) => {
+  .onRequest("session/load", async (ctx) => {
     sessionId = ctx.params.sessionId;
     mcpServers = ctx.params.mcpServers ?? [];
+    if (process.env.COMMANDS_FIXTURE) await ctx.client.notify("session/update", { sessionId, update: { sessionUpdate: "available_commands_update", availableCommands: JSON.parse(process.env.COMMANDS_FIXTURE) } } as any);
     return {};
   })
   .onRequest("session/prompt", async (ctx) => {
