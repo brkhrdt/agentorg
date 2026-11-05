@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 import { z } from "zod";
-import type { LaunchSpec } from "./plugin.ts";
+import { COMPACTION_METHOD, type CompactionNotification, type LaunchSpec } from "./plugin.ts";
 import type { Limits } from "./types.ts";
 import { usageNotificationSchema, type UsageNotification } from "./usage.ts";
 import {
@@ -46,6 +46,7 @@ export class AgentProcess {
     readonly limits: Limits,
     update: (notification: acp.SessionNotification) => void,
     usage: (notification: UsageNotification | null) => void,
+    compaction: (notification: CompactionNotification) => void,
     permission: (
       request: acp.RequestPermissionRequest,
     ) => Promise<acp.RequestPermissionResponse>,
@@ -77,6 +78,13 @@ export class AgentProcess {
       .client({ name: "agent-organization" })
       .onNotification("session/update", (ctx) => update(ctx.params))
       .onNotification("_agentorg/usage", usageNotificationSchema, (ctx) => usage(ctx.params))
+      .onNotification(COMPACTION_METHOD, z.object({
+        sessionId: z.string(), phase: z.enum(["start", "end"]),
+        reason: z.enum(["manual", "threshold", "overflow"]),
+        aborted: z.boolean().optional(), willRetry: z.boolean().optional(),
+        tokensBefore: z.number().nonnegative().optional(), estimatedTokensAfter: z.number().nonnegative().optional(),
+        errorMessage: z.string().optional(),
+      }).strict(), (ctx) => compaction(ctx.params))
       .onRequest("session/request_permission", (ctx) => permission(ctx.params))
       .onNotification(STEERING_STATUS_METHOD, z.object({ sessionId: z.string(), operationId: z.string().min(1), steeringId: z.string().min(1), status: z.enum(["delivered", "failed"]), error: z.object({ code: z.string().optional(), message: z.string() }).optional() }).strict(), (ctx) => steeringStatus(ctx.params as SteeringStatus))
       .connect(

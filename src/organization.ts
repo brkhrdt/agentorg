@@ -17,6 +17,7 @@ import { metricIdSchema, type UsageMetricDefinition, type UsageNotification, typ
 import { pluginError, pluginHost, pluginTimeout } from "./plugin-host.ts";
 import type {
   HarnessPlugin,
+  CompactionNotification,
   LaunchContext,
   LaunchSpec,
   PluginHost,
@@ -693,6 +694,12 @@ export class Organization implements PluginHost {
       if (agent) agent.usage = result.agentUsage;
       this.publishEvent(result.event);
     }
+  }
+  private receiveCompaction(agentId: string, generation: string, input: CompactionNotification) {
+    const runtime = this.runtimes.get(agentId);
+    if (!runtime || runtime.generation !== generation || runtime.process.sessionId !== input.sessionId) return;
+    const { sessionId, ...data } = input;
+    this.emit("agent.compaction", data, agentId, generation);
   }
   private authorize(caller: Caller, id: string, manage = false) {
     if (caller.kind === "agent" && !this.isDescendant(id, caller.id, !manage))
@@ -1778,6 +1785,10 @@ export class Organization implements PluginHost {
         (notification) => {
           if (!this.closing)
             void this.serialize(() => this.receiveUsage(a.id, generation, notification));
+        },
+        (notification) => {
+          if (!this.closing)
+            void this.serialize(() => this.receiveCompaction(a.id, generation, notification));
         },
         (request) => this.permission(a.id, generation, request),
         (status) => {

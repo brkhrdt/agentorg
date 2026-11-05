@@ -13,6 +13,17 @@ export { editDiff } from "./tool-diff.ts";
 export { MCP_TOOL_NAMES, renderMcpTool, coreMcpRenderers, decodeMcpOutput } from "./mcp-tool-rendering.ts";
 
 export const PLUGIN_API_VERSION = 1 as const;
+export const COMPACTION_METHOD = "_agentorg/compaction";
+export type CompactionNotification = {
+  sessionId: string;
+  phase: "start" | "end";
+  reason: "manual" | "threshold" | "overflow";
+  aborted?: boolean;
+  willRetry?: boolean;
+  tokensBefore?: number;
+  estimatedTokensAfter?: number;
+  errorMessage?: string;
+};
 export {
   STEERING_EXTENSION,
   STEERING_METHOD,
