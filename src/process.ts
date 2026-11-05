@@ -79,7 +79,7 @@ export class AgentProcess {
       .onNotification("session/update", (ctx) => update(ctx.params))
       .onNotification("_agentorg/usage", usageNotificationSchema, (ctx) => usage(ctx.params))
       .onNotification(COMPACTION_METHOD, z.object({
-        sessionId: z.string(), phase: z.enum(["start", "end"]),
+        sessionId: z.string(), compactionId: z.string().min(1), phase: z.enum(["start", "end"]),
         reason: z.enum(["manual", "threshold", "overflow"]),
         aborted: z.boolean().optional(), willRetry: z.boolean().optional(),
         tokensBefore: z.number().nonnegative().optional(), estimatedTokensAfter: z.number().nonnegative().optional(),

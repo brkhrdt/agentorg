@@ -16,6 +16,7 @@ export const PLUGIN_API_VERSION = 1 as const;
 export const COMPACTION_METHOD = "_agentorg/compaction";
 export type CompactionNotification = {
   sessionId: string;
+  compactionId: string;
   phase: "start" | "end";
   reason: "manual" | "threshold" | "overflow";
   aborted?: boolean;
