@@ -32,9 +32,10 @@ npm run build                     # dist/agentorg (standalone SEA executable)
 # The build uses the current Node.js executable; build separately on each target OS/CPU.
 ```
 
-If the build Node executable lacks the SEA fuse sentinel, the build fails with guidance instead of producing a launcher or non-standalone fallback. Build on the target OS/CPU; cross-compilation is not supported. Windows is not supported. The application and generic MCP bridge are bundled, and the executable re-runs itself for that internal worker. It contains no Pi code or Pi SDK dependency. For Pi, build the separate plugin and ship
-`dist/index.js` plus its adjacent `dist/pi-acp` executable, then pass
-`--plugin /path/to/pi-plugin/index.js`. That adapter's runtime requirements are documented in its own repository.
+If the build Node executable lacks the SEA fuse sentinel, the build fails with guidance instead of producing a launcher or non-standalone fallback. Build on the target OS/CPU; cross-compilation is not supported. Windows is not supported. The application and generic MCP bridge are bundled, and the executable re-runs itself for that internal worker. It contains no Pi code or Pi SDK dependency. For Pi, build the separate plugin and ship `dist/index.js`, adjacent
+`dist/pi-acp.js` and `dist/pi-extension.ts`, plus a Node.js 22.19+ runtime;
+then pass `--plugin /path/to/pi-plugin/index.js`. The adapter runs as a Node.js
+script; its runtime requirements are documented in the plugin repository.
 
 Install/configure Pi and its Node runtime separately when using the plugin,
 or set the agent's `options.executable` to Pi's path.
@@ -171,7 +172,7 @@ Observers run without blocking the transport; errors become `plugin.error`, and 
 
 ### Pi plugin (separate repository)
 
-Load `--plugin ../agentorg-plugin-pi-agent/src/index.ts` in source mode, or its built `dist/index.js` with the adjacent compiled `pi-acp` adapter in binary deployments. It uses the public `LaunchContext.mcpServers` specs, not core worker paths, and has no runtime imports from core. Existing `harness: "pi"` records and session directories are unchanged; load this plugin to restart/recover them. Without it, Pi is an unknown/unavailable harness (`INVALID_HARNESS` on creation, `START_FAILED` for restart operations), without deleting persisted data. See [installation and runtime overrides](../agentorg-plugin-pi-agent/README.md).
+Load `--plugin ../agentorg-plugin-pi-agent/src/index.ts` in source mode, or its built `dist/index.js` with adjacent `dist/pi-acp.js` and `dist/pi-extension.ts` plus Node.js 22.19+ in binary deployments. It uses the public `LaunchContext.mcpServers` specs, not core worker paths, and has no runtime imports from core. Existing `harness: "pi"` records and session directories are unchanged; load this plugin to restart/recover them. Without it, Pi is an unknown/unavailable harness (`INVALID_HARNESS` on creation, `START_FAILED` for restart operations), without deleting persisted data. See [installation and runtime overrides](../agentorg-plugin-pi-agent/README.md).
 
 Harness-specific options, resource loading, credentials and session details belong to the separate harness plugin's documentation. Feature plugins own their policy, external storage, migration and readiness checks; core never interprets their namespaces.
 
