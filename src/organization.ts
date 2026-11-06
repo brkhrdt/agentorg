@@ -2229,7 +2229,7 @@ export class Organization implements PluginHost {
     add(
       "prompt_subagent",
       "agent.prompt",
-      "Prompt an immediate child only; relay through children for deeper work. If called by an active agent prompt, accepted downward work may be enrolled in that prompt's completion batch. Default supersedes active/queued work; queue=true appends FIFO. Returns immediately with the operation ID. Prefer fire-and-return to avoid prompt-slot deadlocks.",
+      "Prompt an immediate child only; relay through children for deeper work. Returns an operation ID immediately; callers normally need not wait for or poll that operation. When called during an active agent prompt, accepted child work may be enrolled in that caller turn's completion batch and, when eligible, its result is delivered automatically once relevant enrolled work settles and the caller is idle. This does not guarantee delivery for work that was not accepted/enrolled or is otherwise ineligible. Default supersedes active/queued work; queue=true appends FIFO.",
       { agentId: id, text: id, queue: { type: "boolean" } },
       ["agentId", "text"],
     );

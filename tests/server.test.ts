@@ -656,6 +656,10 @@ test("MCP SDK bridge enforces direct-child creation and subtree permissions", as
     expect((server.organization as any).mcpServers(rt.token)[0].name).toBe("agentorg");
     const listedTools = (await mcp.listTools()).tools;
     expect(listedTools.some((tool) => tool.name === "prompt_parent")).toBe(false);
+    const promptTool = listedTools.find((tool) => tool.name === "prompt_subagent")!;
+    expect(promptTool.description).toContain("normally need not wait for or poll that operation");
+    expect(promptTool.description).toContain("accepted child work");
+    expect(promptTool.description).toContain("not accepted/enrolled");
     expect(listedTools.map((tool) => tool.name)).toEqual([
       "create_subagent",
       "prompt_subagent",
