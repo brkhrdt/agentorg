@@ -1,6 +1,6 @@
 import { build } from "esbuild";
 import { spawnSync } from "node:child_process";
-import { chmod, copyFile, mkdir, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -20,7 +20,5 @@ const binary = resolve(dist, "agentorg");
 await copyFile(process.execPath, binary);
 const injection = spawnSync("npx", ["--no-install", "postject", binary, "NODE_SEA_BLOB", resolve(dist, "sea-prep.blob"), "--sentinel-fuse", "NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2"], { cwd: root, stdio: "inherit" });
 if (injection.status !== 0) {
-  console.warn("SEA injection is unavailable for this Node.js executable; writing a Node.js launcher fallback.");
-  await writeFile(binary, `#!/bin/sh\nexec node "$(dirname "$0")/agentorg.cjs" "$@"\n`);
-  await chmod(binary, 0o755);
+  throw new Error("SEA injection failed; refusing to produce a non-standalone launcher fallback.");
 }
