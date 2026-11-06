@@ -6,7 +6,7 @@ The core is harness-neutral and registers **no built-in harnesses**. Load truste
 
 ## Run
 
-Requires Unix and Node.js 22.14 or newer (Node.js 24 is recommended for building standalone executables). Pi is optional and required only when using the separate Pi plugin (Pi 1.0.2+, Node 22.19+).
+Requires Unix and Node.js 22.14 or newer. Pi is optional and required only when using the separate Pi plugin (Pi 1.0.2+, Node 22.19+).
 
 ```sh
 npm ci
@@ -22,17 +22,17 @@ Previously active agents restart by default, parent before child. Use `--no-reco
 
 ### Standalone binary
 
-Build with **Node.js 24+** (Unix):
+Build with **Node.js 22.14+** (Unix), using an executable that includes the SEA fuse sentinel. Node.js 22.14 is the tested builder; some distributions of newer Node versions omit the sentinel.
 
 ```sh
 npm ci
-npm run build                     # dist/agentorg (SEA where supported; otherwise a Node launcher)
+npm run build                     # dist/agentorg (standalone SEA executable)
 ./dist/agentorg --help
 ./dist/agentorg --data-dir /absolute/path/my-org
 # The build uses the current Node.js executable; build separately on each target OS/CPU.
 ```
 
-When SEA injection is supported by the build's Node.js executable, `dist/agentorg` is standalone; otherwise it is a launcher that needs Node.js 22.14+ and the adjacent `dist/agentorg.cjs`. Build on the target OS/CPU; cross-compilation is not supported. Windows is not supported. The application and generic MCP bridge are bundled, and the executable re-runs itself for that internal worker. It contains no Pi code or Pi SDK dependency. For Pi, build the separate plugin and ship
+If the build Node executable lacks the SEA fuse sentinel, the build fails with guidance instead of producing a launcher or non-standalone fallback. Build on the target OS/CPU; cross-compilation is not supported. Windows is not supported. The application and generic MCP bridge are bundled, and the executable re-runs itself for that internal worker. It contains no Pi code or Pi SDK dependency. For Pi, build the separate plugin and ship
 `dist/index.js` plus its adjacent `dist/pi-acp` executable, then pass
 `--plugin /path/to/pi-plugin/index.js`. That adapter's runtime requirements are documented in its own repository.
 

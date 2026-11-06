@@ -1,10 +1,14 @@
 import { build } from "esbuild";
 import { spawnSync } from "node:child_process";
-import { copyFile, mkdir, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const seaFuse = "NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2";
+if (!(await readFile(process.execPath)).includes(Buffer.from(seaFuse))) {
+  throw new Error(`Node ${process.version} has no SEA fuse sentinel; build standalone binaries with a Node 22.14+ executable that supports SEA injection.`);
+}
 const dist = resolve(root, "dist");
 await mkdir(dist, { recursive: true });
 const entry = resolve(dist, "agentorg.cjs");
@@ -18,7 +22,7 @@ const run = (command, args) => {
 run(process.execPath, ["--experimental-sea-config", config]);
 const binary = resolve(dist, "agentorg");
 await copyFile(process.execPath, binary);
-const injection = spawnSync("npx", ["--no-install", "postject", binary, "NODE_SEA_BLOB", resolve(dist, "sea-prep.blob"), "--sentinel-fuse", "NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2"], { cwd: root, stdio: "inherit" });
+const injection = spawnSync("npx", ["--no-install", "postject", binary, "NODE_SEA_BLOB", resolve(dist, "sea-prep.blob"), "--sentinel-fuse", seaFuse], { cwd: root, stdio: "inherit" });
 if (injection.status !== 0) {
   throw new Error("SEA injection failed; refusing to produce a non-standalone launcher fallback.");
 }
