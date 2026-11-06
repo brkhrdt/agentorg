@@ -4,7 +4,7 @@ import { OrganizationClient } from "../src/client.ts";
 import type { AgentRecord, Operation } from "../src/types.ts";
 
 const socketPath = process.argv[2], capDir = process.argv[3];
-if (!socketPath || !capDir) throw new Error("usage: bun scripts/validate-parent-child-comms.ts SOCKET CAPABILITY_DIR");
+if (!socketPath || !capDir) throw new Error("usage: node --experimental-strip-types scripts/validate-parent-child-comms.ts SOCKET CAPABILITY_DIR");
 const operator = await OrganizationClient.connect(socketPath);
 const clients: OrganizationClient[] = [];
 const check: (ok: unknown, message: string) => void = (ok, message) => { if (!ok) throw new Error(message); };

@@ -8,6 +8,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { OrganizationClient } from "./client.ts";
 
+async function main() {
 // The capability is issued by the server, not accepted from tool arguments.
 const socket = process.env.ORG_SOCKET,
   token = process.env.ORG_TOKEN;
@@ -44,3 +45,6 @@ process.stdin.on("end", () => {
 process.on("SIGTERM", () => {
   void close().finally(() => process.exit(0));
 });
+
+}
+void main();

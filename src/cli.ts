@@ -7,6 +7,7 @@ import { OrganizationServer } from "./server.ts";
 import type { ServerPlugin } from "./plugin.ts";
 import { defaults, type Limits } from "./types.ts";
 
+async function main() {
 const { values } = parseArgs({
   options: {
     socket: { type: "string" },
@@ -64,3 +65,6 @@ for (const signal of ["SIGINT", "SIGTERM"] as const)
       },
     );
   });
+
+}
+void main();
