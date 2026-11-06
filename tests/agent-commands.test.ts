@@ -1,4 +1,5 @@
-import { expect, test } from "bun:test";
+import { tsxImport } from "./runtime.ts";
+import { expect, test } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -7,7 +8,7 @@ import { OrganizationClient } from "../src/client.ts";
 import { normalizeAgentCommands } from "../src/agent-commands.ts";
 import type { AgentRecord, Operation } from "../src/types.ts";
 
-const fixture = join(import.meta.dir, "fixtures/agent.ts");
+const fixture = join(import.meta.dirname, "fixtures/agent.ts");
 test("normalizes complete ACP command lists with bounded unstructured metadata", () => {
   expect(normalizeAgentCommands([
     { name: "skill:review", description: "Review\nchange", input: { hint: "Free text" }, _meta: { secret: true } },
@@ -23,7 +24,7 @@ test("ACP startup command update survives session/new response and appears in sn
   const commands = [{ name: "skill:review", description: "Review a change", input: { hint: "Arguments" } }];
   const events: any[] = [];
   const server = await OrganizationServer.start({ dataDir: join(dir, "data"), socketPath: join(dir, "server.sock"), plugins: [{ apiVersion: 1, name: "commands-test", setup(host) {
-    host.registerHarness({ name: "fixture", launch() { return { command: process.execPath, args: [fixture], env: { COMMANDS_FIXTURE: JSON.stringify(commands) } }; } });
+    host.registerHarness({ name: "fixture", launch() { return { command: process.execPath, args: ["--import", tsxImport, fixture], env: { COMMANDS_FIXTURE: JSON.stringify(commands) } }; } });
   } }] });
   const client = await OrganizationClient.connect(join(dir, "server.sock"));
   const off = client.onEvent(event => { if (event.type === "agent.commands") events.push(event); });

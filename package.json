@@ -10,21 +10,21 @@
   },
   "engines": { "node": ">=22.14.0" },
   "scripts": {
-    "start": "node --experimental-strip-types src/cli.ts",
+    "start": "tsx src/cli.ts",
     "build": "node scripts/build-sea.mjs",
-    "test:binary": "npm run build && ORG_BINARY=./dist/agentorg node --import tsx --test tests/binary.test.ts",
+    "test:binary": "npm run build && ORG_BINARY=./dist/agentorg vitest run tests/binary.test.ts",
     "check": "tsc --noEmit",
-    "test": "node --import tsx --test"
+    "test": "vitest run --no-file-parallelism --testTimeout=20000"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.7.0",
     "@modelcontextprotocol/sdk": "1.32.1",
     "diff": "8.0.4",
-    "zod": "^4.3.6"
+    "zod": "^4.3.6",
+    "tsx": "^4.19.3"
   },
   "devDependencies": {
     "@types/node": "^22.13.10",
-    "tsx": "^4.19.3",
     "typescript": "^5.9.3",
     "vitest": "^3.0.8",
     "esbuild": "^0.25.0",

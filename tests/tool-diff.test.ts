@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
 import { editDiff } from "../src/tool-diff.ts";
 
 test("portable diff helper computes retained replacement regions without reading files", () => {

@@ -1,4 +1,5 @@
-import { expect, test } from "bun:test";
+import { tsxImport } from "./runtime.ts";
+import { expect, test } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,7 +23,7 @@ async function operation(org: Organization, method: string, params: unknown): Pr
 const fixture: ServerPlugin = {
   apiVersion: 1, name: "fixture",
   setup(host) {
-    host.registerHarness({ name: "fixture", launch: () => ({ command: process.execPath, args: [join(import.meta.dir, "fixtures/agent.ts")] }) });
+    host.registerHarness({ name: "fixture", launch: () => ({ command: process.execPath, args: ["--import", tsxImport, join(import.meta.dirname, "fixtures/agent.ts")] }) });
   },
 };
 

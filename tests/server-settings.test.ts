@@ -1,4 +1,5 @@
-import { expect, test } from "bun:test";
+import { tsxImport } from "./runtime.ts";
+import { expect, test } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -156,7 +157,7 @@ test("declarations exclude secret/undeclared fields and migrations retain revisi
 test("runtime changes affect admissions without restarting or deleting existing agents and expose no MCP tool", async () => {
   const dir = temp(), org = open(dir);
   try {
-    org.registerHarness({ name: "fixture", launch: () => ({ command: process.execPath, args: [join(import.meta.dir, "fixtures/agent.ts")] }) });
+    org.registerHarness({ name: "fixture", launch: () => ({ command: process.execPath, args: ["--import", tsxImport, join(import.meta.dirname, "fixtures/agent.ts")] }) });
     const create = async (parentId?: string) => {
       const op = await org.request("agent.create", { parentId, settings: { harness: "fixture" } }, client) as Operation;
       return org.request("operation.wait", { operationId: op.id, waitMs: 2000 }, client) as Promise<Operation>;

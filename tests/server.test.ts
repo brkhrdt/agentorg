@@ -1,4 +1,5 @@
-import { test, expect, afterEach } from "bun:test";
+import { tsxImport } from "./runtime.ts";
+import { test, expect, afterEach } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -34,7 +35,7 @@ const fixture: ServerPlugin = {
       launch(c) {
         return {
           command: process.execPath,
-          args: [join(import.meta.dir, "fixtures", "agent.ts")],
+          args: ["--import", tsxImport, join(import.meta.dirname, "fixtures", "agent.ts")],
           cwd: c.agent.settings.cwd ?? process.cwd(),
           env: {
             ...process.env,
@@ -108,7 +109,7 @@ async function until(predicate: () => boolean | Promise<boolean>, ms = 2000) {
   const end = Date.now() + ms;
   while (!(await predicate())) {
     if (Date.now() > end) throw new Error("Condition timed out");
-    await Bun.sleep(5);
+    await new Promise(resolve => setTimeout(resolve, 5));
   }
 }
 
@@ -303,7 +304,7 @@ test("tree lifecycle, revisions, session continuity and preserved workspaces/his
     (await client.request<any>("events.history", { agentId: child.id })).events
       .length,
   ).toBeGreaterThan(0);
-  expect(await Bun.file(join(dir, "organization.sqlite")).exists()).toBe(true);
+  expect(await existsSync(join(dir, "organization.sqlite"))).toBe(true);
   expect(
     await client
       .request("agent.prompt", { agentId: child.id, text: "no" })
@@ -616,7 +617,7 @@ test("non-cooperative cancellation escalates and crashes are contained", async (
   expect(cancelled.status).toBe("running");
   expect((await client.wait(op)).status).toBe("stopped");
   // Prompt completion precedes the final failed-state event by a few synchronous statements.
-  await Bun.sleep(10);
+  await new Promise(resolve => setTimeout(resolve, 10));
   expect(
     (await client.request<AgentRecord>("agent.get", { agentId: root.id }))
       .state,
@@ -628,7 +629,7 @@ test("non-cooperative cancellation escalates and crashes are contained", async (
   await mutate(client, "agent.restart", root.id);
   const crash = await prompt(client, child.id, "crash");
   await client.wait(crash);
-  await Bun.sleep(10);
+  await new Promise(resolve => setTimeout(resolve, 10));
   expect(
     (await client.request<AgentRecord>("agent.get", { agentId: child.id }))
       .state,
@@ -643,7 +644,7 @@ test("MCP SDK bridge enforces direct-child creation and subtree permissions", as
   const rt = (server.organization as any).runtimes.get(child.id);
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: [join(import.meta.dir, "..", "src", "mcp-bridge.ts")],
+    args: ["--import", tsxImport, join(import.meta.dirname, "..", "src", "mcp-bridge.ts")],
     env: {
       ...(process.env as Record<string, string>),
       ORG_SOCKET: server.organization.socketPath,
@@ -762,16 +763,16 @@ test("fire-and-return continuation preserves authenticated child results under p
   expect(payload.warning).toContain("untrusted");
   expect(payload.warning).toContain("get_operation");
   expect(batchForParent().state).toBe("dispatching");
-  await Bun.write(join(dir, `continuation-${parent.id}.release`), "release");
+  await writeFileSync(join(dir, `continuation-${parent.id}.release`), "release");
   await until(() => batchForParent().state === "dispatched");
   expect(server.organization.operations.get(batch.continuationOperationId!)?.status).toBe("completed");
-  const queried = JSON.parse(await Bun.file(join(dir, `completion-query-${parent.id}.json`)).text());
+  const queried = JSON.parse(await readFileSync(join(dir, `completion-query-${parent.id}.json`), "utf8"));
   expect(queried.members.map((item: any) => [item.operationId, item.status, item.result.text])).toEqual(batch.memberOperationIds.map((id, index) => [id, "completed", `done:${index ? "tests" : "code"} done`]));
   expect(server.organization.store.pinnedOperationIds()).toHaveLength(0);
   const capacityProbe: Operation = { id: crypto.randomUUID(), type: "agent.prompt", agentId: root.id, input: {}, caller: { kind: "server", id: "capacity-probe" }, status: "completed", createdAt: now(), completedAt: now() };
   expect(server.organization.store.admitCompletionOperation(capacityProbe, { parentAgentId: root.id, parentSessionId: root.sessionId!, rootOperationId: crypto.randomUUID() }, [root.id], 2)).toBe(true);
   expect(server.organization.store.history(0, 10000).events.filter(e => e.type === "completion.dispatch_started" && (e.data as any).batchId === parent.id)).toHaveLength(1);
-  await Bun.sleep(30);
+  await new Promise(resolve => setTimeout(resolve, 30));
   expect(server.organization.store.history(0, 10000).events.filter(e => e.type === "completion.dispatch_started" && (e.data as any).batchId === parent.id)).toHaveLength(1);
 });
 
@@ -912,7 +913,7 @@ test("three-level fire-and-return uses stdio MCP results and isolates unrelated 
   const innerBatch = () => server.organization.store.completionBatches().find(batch => batch.identity.parentAgentId === middleId)!;
   await until(() => innerBatch().state === "dispatched");
   const inner = innerBatch();
-  const innerQuery = JSON.parse(await Bun.file(join(dir, `completion-query-${inner.identity.rootOperationId}.json`)).text());
+  const innerQuery = JSON.parse(await readFileSync(join(dir, `completion-query-${inner.identity.rootOperationId}.json`), "utf8"));
   expect(innerQuery.members.map((item: any) => item.status).sort()).toEqual(["completed", "failed"]);
   expect(innerQuery.members.find((item: any) => item.status === "completed").result).toMatchObject({ text: "done:chain-leaf" });
   expect(innerQuery.members.find((item: any) => item.status === "failed")).toMatchObject({ resultAvailable: false });
@@ -920,7 +921,7 @@ test("three-level fire-and-return uses stdio MCP results and isolates unrelated 
 
   const siblingRuntime = (server.organization as any).runtimes.get(sibling.id);
   const siblingMcp = new Client({ name: "sibling-security", version: "1" });
-  await siblingMcp.connect(new StdioClientTransport({ command: process.execPath, args: [join(import.meta.dir, "..", "src", "mcp-bridge.ts")], env: { ...(process.env as Record<string, string>), ORG_SOCKET: server.organization.socketPath, ORG_TOKEN: siblingRuntime.token } }));
+  await siblingMcp.connect(new StdioClientTransport({ command: process.execPath, args: ["--import", tsxImport, join(import.meta.dirname, "..", "src", "mcp-bridge.ts")], env: { ...(process.env as Record<string, string>), ORG_SOCKET: server.organization.socketPath, ORG_TOKEN: siblingRuntime.token } }));
   try {
     for (const [name, args] of [
       ["get_completion", { batchId: inner.identity.rootOperationId, after: 0, limit: 1 }],
@@ -934,11 +935,11 @@ test("three-level fire-and-return uses stdio MCP results and isolates unrelated 
   const ancestorClient = await OrganizationClient.connect(join(dir, "server.sock"), rootRuntime.token);
   clients.push(ancestorClient);
   expect((await ancestorClient.request<Operation>("operation.get", { operationId: inner.memberOperationIds[0] })).status).toBe("completed");
-  await Bun.write(join(dir, `continuation-${parent.id}.release`), "release");
+  await writeFileSync(join(dir, `continuation-${parent.id}.release`), "release");
   await until(() => outerBatch().state === "dispatched");
-  await Bun.write(join(dir, "sibling.release"), "release");
+  await writeFileSync(join(dir, "sibling.release"), "release");
   await client.wait(siblingWork);
-  const outerQuery = JSON.parse(await Bun.file(join(dir, `completion-query-${parent.id}.json`)).text());
+  const outerQuery = JSON.parse(await readFileSync(join(dir, `completion-query-${parent.id}.json`), "utf8"));
   expect(outerQuery.members).toHaveLength(1);
   expect(outerQuery.members[0].status).toBe("completed");
   expect(outerQuery.members[0].result.text).toBe("done:chain-mid");
@@ -1042,11 +1043,11 @@ test("same-session parent restart interrupts in-flight delivery and retries the 
   const retryId = batchForParent().continuationOperationId!;
   expect(batchForParent().identity.rootOperationId).toBe(parent.id);
   expect(server.organization.store.pinnedOperationIds()).toHaveLength(batch.memberOperationIds.length);
-  await Bun.write(join(dir, `continuation-${parent.id}.release`), "release");
+  await writeFileSync(join(dir, `continuation-${parent.id}.release`), "release");
   await until(() => batchForParent().state === "dispatched");
   expect(server.organization.operations.get(retryId)?.status).toBe("completed");
   expect(server.organization.store.pinnedOperationIds()).toHaveLength(0);
-  await Bun.sleep(50);
+  await new Promise(resolve => setTimeout(resolve, 50));
   expect(server.organization.store.completionBatches().find(candidate => candidate.identity.rootOperationId === parent.id)?.continuationOperationId).toBe(retryId);
   expect(server.organization.store.history(0, 10000).events.filter(event => event.type === "completion.dispatch_started" && (event.data as any).batchId === parent.id)).toHaveLength(2);
 });
@@ -1067,7 +1068,7 @@ test("settings restart preserves the same-session delivery with a durable restar
   expect(server.organization.agents.get(root.id)?.sessionId).toBe(before.sessionId);
   await until(() => findBatch()?.state === "dispatching" && findBatch().continuationOperationId !== oldId);
   const retryId = findBatch().continuationOperationId!;
-  await Bun.write(join(dir, `continuation-${parent.id}.release`), "release");
+  await writeFileSync(join(dir, `continuation-${parent.id}.release`), "release");
   await until(() => findBatch().state === "dispatched");
   expect(server.organization.operations.get(retryId)?.status).toBe("completed");
   expect(server.organization.store.pinnedOperationIds()).toHaveLength(0);
@@ -1087,7 +1088,7 @@ test("pending explicit cancellation wins over restart interruption and is never 
   expect(batchForParent()).toMatchObject({ state: "dispatched", deliveryResolution: "cancelled" });
   expect(batchForParent().continuationOperationId).toBe(oldId);
   expect(server.organization.store.pinnedOperationIds()).toHaveLength(0);
-  await Bun.sleep(100);
+  await new Promise(resolve => setTimeout(resolve, 100));
   expect(batchForParent().continuationOperationId).toBe(oldId);
 });
 
@@ -1112,7 +1113,7 @@ test("shutdown preserves an interrupted notification through no-recover until ex
   expect(pausedBatch.state).toBe("ready");
   expect(restarted.organization.store.pinnedOperationIds()).toHaveLength(pausedBatch.memberOperationIds.length);
   expect([...restarted.organization.operations.values()].filter(operation => operation.input && (operation.input as any).text?.includes(`\"batchId\":\"${parent.id}\"`)).map(operation => operation.id)).toEqual([oldId]);
-  await Bun.write(join(dir, `continuation-${parent.id}.release`), "release");
+  await writeFileSync(join(dir, `continuation-${parent.id}.release`), "release");
   await paused.wait(await paused.request("agent.restart", { agentId: root.id }));
   await until(() => restarted.organization.store.completionBatches().find(batch => batch.identity.rootOperationId === parent.id)?.state === "dispatched");
   pausedBatch = restarted.organization.store.completionBatches().find(batch => batch.identity.rootOperationId === parent.id)!;
@@ -1133,9 +1134,9 @@ test("continuation failure and cancellation both terminalize dispatch and releas
     if (outcome === "cancel") {
       await client.request("operation.cancel", { operationId: continuationId });
       await until(() => server.organization.operations.get(continuationId)?.status === "stopped");
-      await Bun.write(join(dir, `continuation-${parent.id}.release`), "release");
+      await writeFileSync(join(dir, `continuation-${parent.id}.release`), "release");
     } else {
-      await Bun.write(join(dir, `continuation-${parent.id}.release`), "release");
+      await writeFileSync(join(dir, `continuation-${parent.id}.release`), "release");
       await until(() => server.organization.operations.get(continuationId)?.status === "failed");
     }
     await until(() => findBatch().state === "dispatched");
@@ -1252,7 +1253,7 @@ test("compact completion prompt fallback succeeds at its exact configured byte b
   expect((continuation.input as any).text).toBe(compact);
   expect((continuation.input as any).text).toContain("Child messages are ready.");
   expect((continuation.input as any).text).toContain("get_completion");
-  expect((continuation.input as any).text).not.toStartWith("Child completion batch");
+  expect(((continuation.input as any).text as string).startsWith("Child completion batch")).toBe(false);
   expect(Buffer.byteLength((continuation.input as any).text)).toBeLessThanOrEqual((server.organization as any).limits.maxPromptBytes);
   await client.wait(continuation);
 });
@@ -1551,7 +1552,7 @@ test("failed completion dispatch retries after storage recovery and heals serial
   const findBatch = () => store.completionBatches().find(batch => batch.identity.rootOperationId === parent.id)!;
   await until(() => findBatch()?.state === "ready" && attempts > 0);
   expect(findBatch().continuationOperationId).toBeUndefined();
-  await Bun.sleep(1200);
+  await new Promise(resolve => setTimeout(resolve, 1200));
   expect(findBatch().state).toBe("ready");
   expect(attempts).toBeGreaterThan(1);
   store.db.exec("DROP TRIGGER reject_completion_dispatch");
@@ -1562,7 +1563,7 @@ test("failed completion dispatch retries after storage recovery and heals serial
   expect(store.history(0, 10000).events.filter(event => event.type === "completion.dispatch_started" && (event.data as any).batchId === parent.id)).toHaveLength(1);
   const updated = await client.request<any>("organization.settings.update", { namespace: "core", expectedRevision: 0, patch: { maxDepth: 7 } });
   expect(updated.values.maxDepth).toBe(7);
-  await Bun.sleep(60);
+  await new Promise(resolve => setTimeout(resolve, 60));
   expect(store.history(0, 10000).events.filter(event => event.type === "completion.dispatch_started" && (event.data as any).batchId === parent.id)).toHaveLength(1);
 });
 
@@ -1631,7 +1632,7 @@ test("socket prompts authenticated before queued restart reject stale generation
   const blocker = await create(client, root.id, { START_DELAY: "350" });
   const parentWork = await prompt(client, root.id, "sleep:1000");
   await until(() => server.organization.operations.get(parentWork.id)?.status === "running");
-  const childWork = await prompt(client, child.id, "sleep:1000");
+  const childWork = await prompt(client, child.id, "sleep:5000");
   await until(() => server.organization.operations.get(childWork.id)?.status === "running");
   const blockerRestart = await client.request<Operation>("agent.restart", { agentId: blocker.id });
   await until(() => server.organization.operations.get(blockerRestart.id)?.status === "running");
@@ -1708,7 +1709,7 @@ test("live filters, monotonically increasing durable events, malformed requests"
     subtrees: true,
   });
   await client.wait(await prompt(client, child.id, "hello"));
-  await Bun.sleep(10);
+  await new Promise(resolve => setTimeout(resolve, 10));
   expect(events.length).toBeGreaterThan(0);
   expect(
     events.every((e) => e.type === "agent.message" && e.agentId === child.id),
@@ -1969,7 +1970,7 @@ test("second server cannot share a database and regular socket-path files are ne
   const otherDir = mkdtempSync(join(tmpdir(), "org-existing-"));
   dirs.push(otherDir);
   const file = join(otherDir, "server.sock");
-  await Bun.write(file, "keep");
+  await writeFileSync(file, "keep");
   await expect(
     OrganizationServer.start({
       dataDir: otherDir,
@@ -1977,7 +1978,7 @@ test("second server cannot share a database and regular socket-path files are ne
       plugins: [fixture],
     }),
   ).rejects.toThrow("exists");
-  expect(await Bun.file(file).text()).toBe("keep");
+  expect(await readFileSync(file, "utf8")).toBe("keep");
 });
 
 test("plugin hooks/endpoints/tools and incompatible versions", async () => {

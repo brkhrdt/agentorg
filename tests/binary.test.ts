@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
 import { chmod, copyFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -6,18 +6,19 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { OrganizationClient } from "../src/client.ts";
 import type { AgentRecord, Operation } from "../src/types.ts";
+import { spawn, tsxImport } from "./runtime.ts";
 
 // Core binary requires no Pi runtime/dependencies or built-in harness.
 test.skipIf(!process.env.ORG_BINARY)("standalone generic host, explicit ACP plugin and MCP subprocess", async () => {
   const dir = await mkdtemp(join(tmpdir(), "org-binary-"));
   const binary = join(dir, "agentorg");
-  let server: ReturnType<typeof Bun.spawn> | undefined;
+  let server: ReturnType<typeof spawn> | undefined;
   let client: OrganizationClient | undefined;
   let mcp: Client | undefined;
   try {
     await copyFile(resolve(process.env.ORG_BINARY!), binary);
     await chmod(binary, 0o755);
-    const help = Bun.spawn([binary, "--help"], { cwd: dir, env: { PATH: dir }, stdout: "pipe" });
+    const help = spawn([binary, "--help"], { cwd: dir, env: { PATH: dir }, stdout: "pipe" });
     expect(await new Response(help.stdout).text()).toContain("agentorg [");
     expect(await help.exited).toBe(0);
     const plugin = join(dir, "fixture-plugin.js");
@@ -26,7 +27,7 @@ test.skipIf(!process.env.ORG_BINARY)("standalone generic host, explicit ACP plug
     await writeFile(plugin, `import {writeFileSync} from 'node:fs';
 export default {apiVersion:1,name:'fixture',setup(host){host.registerHarness({name:'fixture',launch(ctx){
 writeFileSync(${JSON.stringify(bridgeFile)},JSON.stringify(ctx.mcpServers[0]));
-return {command:${JSON.stringify(process.execPath)},args:[${JSON.stringify(join(import.meta.dir, 'fixtures/agent.ts'))}],env:{...process.env,ORG_FIXTURE:'{}'}};
+return {command:${JSON.stringify(process.execPath)},args:["--import",${JSON.stringify(tsxImport)},${JSON.stringify(join(import.meta.dirname, 'fixtures/agent.ts'))}],env:{...process.env,ORG_FIXTURE:'{}'}};
 }});
 host.registerSettings({namespace:'demo',validate(value){if(typeof value!=='object')throw new Error('demo object required');return value;}});
 host.registerCapability('demo',{settingsNamespace:'demo'});
@@ -36,11 +37,11 @@ host.validateLaunch(spec=>{writeFileSync(${JSON.stringify(launchFile)},JSON.stri
 }};`);
     const dataDir = join(dir, "data");
     const socket = join(dataDir, "server.sock");
-    server = Bun.spawn([binary, "--data-dir", dataDir, '--plugin', plugin], { cwd: dir, env: { PATH: dir }, stdout: "ignore", stderr: "pipe" });
+    server = spawn([binary, "--data-dir", dataDir, '--plugin', plugin], { cwd: dir, env: { ...process.env, PATH: dir }, stdout: "ignore", stderr: "pipe" });
     const deadline = Date.now() + 5000;
     while (!client) {
       try { client = await OrganizationClient.connect(socket); }
-      catch { if (Date.now() > deadline) throw new Error("Binary server did not start"); await Bun.sleep(20); }
+      catch { if (Date.now() > deadline) throw new Error("Binary server did not start"); await new Promise(resolve => setTimeout(resolve, 20)); }
     }
     const snapshot = await client.request<{ capabilities: { cwd: string; pathCompletion: boolean } }>('organization.snapshot');
     expect(snapshot.capabilities.cwd).toBe(dir);
@@ -70,7 +71,7 @@ host.validateLaunch(spec=>{writeFileSync(${JSON.stringify(launchFile)},JSON.stri
     while (Date.now() < pageDeadline) {
       completion = await client.request<any>("completion.get", { batchId: delegated.id, after: 0, limit: 10 });
       if (completion.state === "dispatched" || completion.s === "suppressed") break;
-      await Bun.sleep(20);
+      await new Promise(resolve => setTimeout(resolve, 20));
     }
     expect(completion.state ?? completion.s).toBe("dispatched");
     const queried = JSON.parse(await readFile(join(dir, `completion-query-${delegated.id}.json`), "utf8"));

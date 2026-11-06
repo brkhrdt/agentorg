@@ -23,7 +23,7 @@ const plugin: ServerPlugin = {
       launch(context) {
         return {
           command: process.execPath,
-          args: [join(import.meta.dir, "../tests/fixtures/agent.ts")],
+          args: [join(import.meta.dirname, "../tests/fixtures/agent.ts")],
           cwd: context.agent.settings.cwd ?? process.cwd(),
           env: {
             ...process.env,

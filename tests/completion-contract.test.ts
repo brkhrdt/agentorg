@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
 import { canAdmitCompletionOperation, canMarkCompletionBatchReady, classifyPrompt, sameCompletionSession, transitionCompletionBatch, type CompletionBatch } from "../src/completion-contract.ts";
 import { defaults, type Operation } from "../src/types.ts";
 

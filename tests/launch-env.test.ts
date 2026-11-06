@@ -1,4 +1,5 @@
-import { expect, test } from "bun:test";
+import { tsxImport } from "./runtime.ts";
+import { expect, test } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,7 +13,7 @@ test.each([true, false])("launch inheritEnv=%s preserves opt-in wrapper environm
     org.prepareLaunch(context => { context.executionEnvironment = "container"; context.env.TRUSTED_PLUGIN_ENV = "trusted"; });
     org.registerHarness({ name: "fixture", launch: context => {
       expect(context.executionEnvironment).toBe("container");
-      return { command: process.execPath, args: [join(import.meta.dir, "fixtures/agent.ts")], inheritEnv, env: { EXPLICIT_ENV: "explicit" } };
+      return { command: process.execPath, args: ["--import", tsxImport, join(import.meta.dirname, "fixtures/agent.ts")], inheritEnv, env: { EXPLICIT_ENV: "explicit" } };
     } });
     let validated = false;
     org.validateLaunch(spec => {
@@ -21,7 +22,7 @@ test.each([true, false])("launch inheritEnv=%s preserves opt-in wrapper environm
       expect(spec.env?.TRUSTED_PLUGIN_ENV).toBe("trusted");
       expect(spec.env?.AGENT_ONLY_ENV).toBe(inheritEnv ? "untrusted" : undefined);
       expect(spec.env?.HOME).toBe(inheritEnv ? process.env.HOME : undefined);
-      expect(spec.env?.ORG_TOKEN).toBeString();
+      expect(spec.env?.ORG_TOKEN).toEqual(expect.any(String));
     });
     const accepted = await org.request("agent.create", { settings: { harness: "fixture", env: { AGENT_ONLY_ENV: "untrusted" } } }) as Operation;
     const result = await org.request("operation.wait", { operationId: accepted.id, waitMs: 5000 }) as Operation;

@@ -1,4 +1,5 @@
-import { expect, test } from "bun:test";
+import { tsxImport } from "./runtime.ts";
+import { expect, test } from "vitest";
 import { settingsSchema, settingsPatchSchema, type AgentRecord, type Operation } from "../src/types.ts";
 import { Organization } from "../src/organization.ts";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -35,7 +36,7 @@ test("transparent extension grant arrays survive cwd-only and name-only lifecycl
   const dir = mkdtempSync(join(tmpdir(), "extension-grant-preservation-"));
   const org = new Organization(join(dir, "server.sock"), dir);
   try {
-    org.registerHarness({ name: "fixture", launch: () => ({ command: process.execPath, args: [join(import.meta.dir, "fixtures/agent.ts")] }) });
+    org.registerHarness({ name: "fixture", launch: () => ({ command: process.execPath, args: ["--import", tsxImport, join(import.meta.dirname, "fixtures/agent.ts")] }) });
     org.registerSettings({ namespace: "podman", validate: value => value });
     org.registerSettings({ namespace: "sibling", validate: value => value });
     const initial = {
@@ -91,7 +92,7 @@ test("generic participant atomic related updates, compensation, finalize and nes
   const org = new Organization(join(dir, "server.sock"), dir, { stopTimeoutMs: 100, killTimeoutMs: 50 });
   const calls: string[] = [];
   try {
-    org.registerHarness({ name: "fixture", launch: () => ({ command: process.execPath, args: [join(import.meta.dir, "fixtures/agent.ts")] }) });
+    org.registerHarness({ name: "fixture", launch: () => ({ command: process.execPath, args: ["--import", tsxImport, join(import.meta.dirname, "fixtures/agent.ts")] }) });
     expect((await org.request("organization.snapshot") as any).capabilities.harnesses).toEqual(["fixture"]);
     org.registerSettings({ namespace: "demo", validate: value => value, launchKey: () => "none" });
     org.registerSettings({ namespace: "other", validate: value => value });

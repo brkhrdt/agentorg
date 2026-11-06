@@ -1,7 +1,8 @@
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawn } from "./runtime.ts";
 import { OrganizationClient } from "../src/client.ts";
 import { Store } from "../src/store.ts";
 import { now, type AgentRecord } from "../src/types.ts";
@@ -21,7 +22,7 @@ test.each([
     removedAt: null, createdAt: now(), updatedAt: now(),
   });
   store.close();
-  const process = Bun.spawn([Bun.which("bun")!, join(import.meta.dir, "../src/cli.ts"), "--data-dir", dir, ...flags], { stdout: "ignore", stderr: "pipe" });
+  const child = spawn([process.execPath, "--import", "tsx", join(import.meta.dirname, "../src/cli.ts"), "--data-dir", dir, ...flags], { stdout: "ignore", stderr: "pipe" });
   let client: OrganizationClient | undefined;
   try {
     const deadline = Date.now() + 5000;
@@ -30,13 +31,13 @@ test.each([
       try {
         client ??= await OrganizationClient.connect(join(dir, "server.sock"));
         snapshot = await client.request("organization.snapshot");
-      } catch { await Bun.sleep(20); }
+      } catch { await new Promise(resolve => setTimeout(resolve, 20)); }
     }
     expect(snapshot?.agents[0]?.state).toBe(state);
     // An unavailable harness proves that default recovery actually attempts a launch.
     client?.close(); client = undefined;
-    process.kill("SIGTERM");
-    expect(await process.exited).toBe(0);
+    child.kill("SIGTERM");
+    expect(await child.exited).toBe(0);
     const persisted = new Store(join(dir, "organization.sqlite"));
     try {
       const ready = persisted.history(0, 100).events.find(e => e.type === "server.ready");
@@ -44,13 +45,13 @@ test.each([
     } finally { persisted.close(); }
   } finally {
     client?.close();
-    process.kill(); await process.exited;
+    child.kill(); await child.exited;
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("CLI help advertises recovery opt-out", async () => {
-  const process = Bun.spawn([Bun.which("bun")!, join(import.meta.dir, "../src/cli.ts"), "--help"], { stdout: "pipe" });
-  expect(await new Response(process.stdout).text()).toContain("--no-recover");
-  expect(await process.exited).toBe(0);
+  const child = spawn([process.execPath, "--import", "tsx", join(import.meta.dirname, "../src/cli.ts"), "--help"], { stdout: "pipe" });
+  expect(await new Response(child.stdout).text()).toContain("--no-recover");
+  expect(await child.exited).toBe(0);
 });

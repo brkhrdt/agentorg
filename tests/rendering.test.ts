@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -25,7 +25,7 @@ test("renderer precedence, exact tool identity, any harness event and generic no
   expect(registry.render(event("agent.message"), "other", "server.default")).toBeUndefined();
   const levels = registry.render(event(), "pi", "server.default")!;
   expect(levels.summary.split("\n")).toHaveLength(1);
-  expect(levels.summary).toEndWith("…");
+  expect(levels.summary.endsWith("…")).toBe(true);
   expect(levels.extended.split("\n")).toHaveLength(2);
   expect(levels.full).toContain("all content");
 });
@@ -70,7 +70,7 @@ test("accidental async renderers are rejected safely and source text stays liter
   registry.registerHarness("async", [renderer("bad", { render: (async () => { throw new Error("async failure"); }) as any })]);
   expect(registry.render(event(), "async", "core.tools")?.rendererId).toBe("core.tools");
   expect(registry.catalog().find(r => r.id === "async/bad")!.examples).toEqual([]);
-  await Bun.sleep(0); // A rejected async callback must not become an unhandled rejection.
+  await new Promise(resolve => setTimeout(resolve, 0)); // A rejected async callback must not become an unhandled rejection.
   const output = renderTool(event("tool.call", { title: "read", rawInput: { path: "a*[file]`name`.ts" } }));
   expect(output.summary).toBe("• read");
   expect(output.full).toContain('"path": "a*[file]`name`.ts"');

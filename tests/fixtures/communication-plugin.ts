@@ -1,3 +1,4 @@
+import { tsxImport } from "../runtime.ts";
 import { join } from "node:path";
 import { mkdirSync, writeFileSync } from "node:fs";
 import type { ServerPlugin } from "../../src/plugin.ts";
@@ -18,7 +19,7 @@ const communicationPlugin: ServerPlugin = {
         }
         return {
           command: process.execPath,
-          args: [join(import.meta.dir, "agent.ts")],
+          args: ["--import", tsxImport, join(import.meta.dirname, "agent.ts")],
           cwd: context.agent.settings.cwd ?? process.cwd(),
           env: { ...process.env, ...context.agent.settings.env, ORG_SOCKET: context.socketPath, ORG_TOKEN: context.token },
         };

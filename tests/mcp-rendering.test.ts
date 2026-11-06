@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -41,7 +41,7 @@ test("Pi-prefixed projections decode by canonical registration without changing 
   for (const status of ["queued", "running", "completed", "failed", "stopped", "interrupted"]) {
     const e = event("mcp__agentorg__get_operation", envelope({ a: true, s: status, t: true, r: null }));
     const original = structuredClone(e), rendered = registry.render(e, "pi", "core.tools")!;
-    expect(rendered.extended.split("\n")[1]).toStartWith(`${status} · \\[TRUNCATED\\]`);
+    expect(rendered.extended.split("\n")[1].startsWith(`${status} · \\[TRUNCATED\\]`)).toBe(true);
     expect(rendered.invocationError).toBe(false);
     expect(rendered.subtype).toBe("mcp__agentorg__get_operation");
     expect(rendered.canonicalTool).toBe("get_operation"); expect(rendered.toolSymbol).toBe("∴");
@@ -55,7 +55,7 @@ test("expanded and compact completion states, suppression and retention have ide
     { b: "batch", s: "suppressed", t: 2, a: 0, n: 1, q: "explicit-stop", i: [{ s: "missing-or-pruned", r: false }] },
   ]) {
     const result = renderMcpTool("get_completion", event("get_completion", envelope(value), { batchId: "batch" }));
-    expect(result.extended.split("\n")[1]).toStartWith("suppressed · Suppression: explicit-stop");
+    expect(result.extended.split("\n")[1]).toMatch(/^suppressed · Suppression: explicit-stop/);
     expect(result.full).toContain("Member statuses: missing-or-pruned");
     expect(result.full).toContain("operation retention, not result bodies");
     expect(result.full).toContain("Next cursor: 1"); expect(result.full).not.toContain("TRUNCATED");
@@ -66,7 +66,7 @@ test("only recognized envelopes establish invocation failure; direct domain isEr
   const direct = renderMcpTool("get_operation", event("get_operation", { s: "failed", isError: true, r: false }));
   expect(direct.invocationError).toBe(false); expect(direct.full).not.toContain("Invocation failed");
   const failed = renderMcpTool("get_operation", event("get_operation", envelope({ code: "FORBIDDEN", message: "denied" }, true)));
-  expect(failed.invocationError).toBe(true); expect(failed.extended.split("\n")[1]).toStartWith("failed invocation");
+  expect(failed.invocationError).toBe(true); expect(failed.extended.split("\n")[1]).toMatch(/^failed invocation/);
   expect(failed.full).toContain("FORBIDDEN: denied");
 });
 
@@ -122,7 +122,7 @@ test("lifecycle and agent details reflect actual nested result contracts without
   const replaced = renderMcpTool("replace_subagent_session", event("replace_subagent_session", envelope({ id: "op", status: "completed", result: { state: "running", sessionId: "session-2", sessionNumber: 2 } }), { agentId: "child" }));
   expect(replaced.full).toContain("sessionNumber: 2"); expect(replaced.full).toContain("sessionId: session-2");
   const inspected = renderMcpTool("get_subagent", event("get_subagent", envelope({ name: "worker", state: "stopped", settings: { model: "provider/model" }, revision: 3, removedAt: "yesterday" })));
-  expect(inspected.extended.split("\n")[1]).toStartWith("stopped"); expect(inspected.full).toContain("model: provider/model");
+  expect(inspected.extended.split("\n")[1]).toMatch(/^stopped/); expect(inspected.full).toContain("model: provider/model");
   const cancelled = renderMcpTool("cancel_operation", event("cancel_operation", envelope({ id: "op", status: "running", cancelRequested: true, result: "CHILD SECRET ANSWER" })));
   expect(cancelled.extended).toContain("Cancellation requested: yes"); expect(cancelled.extended).not.toContain("CHILD SECRET ANSWER");
 });
@@ -131,7 +131,7 @@ test("aliases reject asynchronous factories, unknown targets and canonical redir
   const asyncRegistry = new RendererRegistry();
   asyncRegistry.registerHarness("async", [], (async () => { throw new Error("rejected alias"); }) as any);
   expect(() => asyncRegistry.validateRegistrations(MCP_TOOL_NAMES)).toThrow("synchronous");
-  await Bun.sleep(0); // No unhandled rejection after rejecting invalid asynchronous factories.
+  await new Promise(resolve => setTimeout(resolve, 0)); // No unhandled rejection after rejecting invalid asynchronous factories.
   for (const aliases of [{ unknown: "missing" }, { get_operation: "wait_operation" }] as Array<Record<string, string>>) {
     const registry = new RendererRegistry(); registry.registerHarness("h", [], aliases);
     expect(() => registry.validateRegistrations(MCP_TOOL_NAMES)).toThrow();
@@ -171,7 +171,7 @@ test("exact and automatic renderer failures fall through; missing identity never
   registry.registerToolRenderer(descriptor("bad.automatic", "custom", { render: () => { throw new Error("bad automatic"); } }));
   expect(registry.render(event("custom", null), "h", "missing")?.rendererId).toBe("generic");
   expect(() => registry.registerToolRenderer(descriptor("wrong.phase", "custom2", { eventTypes: ["agent.message"], examples: [{ type: "agent.message", data: {} }] }))).toThrow("tool event phases");
-  await Bun.sleep(0);
+  await new Promise(resolve => setTimeout(resolve, 0));
 });
 
 test("presentation byte limits include their warnings without hiding the header-detail status", () => {
@@ -195,7 +195,7 @@ test("prompt display names never rewrite received payloads, and late tools inval
     org.agents.set("child-id", { id: "child-id", name: "[Reviewer] *one*", sessionId: "session-id" } as AgentRecord);
     const e = event("prefix_prompt_subagent", envelope({ answer: "Keep @child-id literally" }), { agentId: "child-id", text: "Keep @child-id literally", queue: true });
     const original = structuredClone(e), rendering = org.renderEvent(e)!;
-    expect(rendering.summary).toStartWith("Coordinator: @\\[Reviewer\\] \\*one\\*"); expect(rendering.toolTarget).toBe("@[Reviewer] *one*"); expect(rendering.toolSender).toBe("Coordinator");
+    expect(rendering.summary.startsWith("Coordinator: @\\[Reviewer\\] \\*one\\*")).toBe(true); expect(rendering.toolTarget).toBe("@[Reviewer] *one*"); expect(rendering.toolSender).toBe("Coordinator");
     expect(rendering.full).toContain('"text": "Keep @child-id literally"'); expect(rendering.full).toContain('"answer\\":\\"Keep @child-id literally');
     expect(e).toEqual(original);
     org.operations.set("operation-prompt", { id: "operation-prompt", type: "agent.prompt", agentId: "child-id", caller: { kind: "agent", id: "parent" }, status: "completed", input: {}, result: { text: "A child response", truncated: false }, createdAt: "now" });

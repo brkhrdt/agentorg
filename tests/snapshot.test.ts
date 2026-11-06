@@ -1,4 +1,5 @@
-import { expect, test } from "bun:test";
+import { tsxImport } from "./runtime.ts";
+import { expect, test } from "vitest";
 import { mkdtempSync, rmSync, mkdirSync, readFileSync, writeFileSync, statSync, existsSync, symlinkSync, lstatSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -23,7 +24,7 @@ test("escaping-heavy MCP export preflights the fixed client cap before overwriti
   const workspace = join(dir, "workspace"); mkdirSync(workspace);
   const tokens = new Map<string, string>();
   const server = await OrganizationServer.start({ dataDir: join(dir, "data"), socketPath: join(dir, "server.sock"), plugins: [{ apiVersion: 1, name: "response-cap-fixture", setup(host) {
-    host.registerHarness({ name: "fixture", launch(context) { tokens.set(context.agent.id, context.token); return { command: process.execPath, args: [join(import.meta.dir, "fixtures/agent.ts")] }; } });
+    host.registerHarness({ name: "fixture", launch(context) { tokens.set(context.agent.id, context.token); return { command: process.execPath, args: ["--import", tsxImport, join(import.meta.dirname, "fixtures/agent.ts")] }; } });
   } }] });
   const clients: OrganizationClient[] = [];
   const reportPath = join(workspace, "boundary.json");
@@ -66,7 +67,7 @@ test("agent snapshots select adjacent records and export a complete safe metadat
     host.registerSettings({ namespace: "public-fixture", validate: value => value, snapshotMetadata(value) { const v = value as any; return { directoryGrants: { readOnly: v.readOnly, readWrite: v.readWrite }, skills: v.skills }; } });
     host.registerSettings({ namespace: "private-fixture", validate: value => value });
     host.registerSettings({ namespace: "invalid-fixture", validate: value => value, snapshotMetadata() { const cyclic: any = {}; cyclic.self = cyclic; return cyclic; } });
-    host.registerHarness({ name: "fixture", launch(context) { tokens.set(context.agent.id, context.token); return { command: process.execPath, args: [join(import.meta.dir, "fixtures/agent.ts")] }; } });
+    host.registerHarness({ name: "fixture", launch(context) { tokens.set(context.agent.id, context.token); return { command: process.execPath, args: ["--import", tsxImport, join(import.meta.dirname, "fixtures/agent.ts")] }; } });
   } }] });
   const clients: OrganizationClient[] = [];
   try {
@@ -133,7 +134,7 @@ test("an implicit server-default cwd does not authorize agent snapshot export", 
   const dir = mkdtempSync(join(tmpdir(), "org-snapshot-implicit-cwd-"));
   const tokens = new Map<string, string>();
   const plugins = [{ apiVersion: 1 as const, name: "cwd-fixture", setup(host: any) {
-    host.registerHarness({ name: "fixture", launch(context: any) { tokens.set(context.agent.id, context.token); return { command: process.execPath, args: [join(import.meta.dir, "fixtures/agent.ts")] }; } });
+    host.registerHarness({ name: "fixture", launch(context: any) { tokens.set(context.agent.id, context.token); return { command: process.execPath, args: ["--import", tsxImport, join(import.meta.dirname, "fixtures/agent.ts")] }; } });
   } }];
   let server = await OrganizationServer.start({ dataDir: join(dir, "data"), socketPath: join(dir, "server.sock"), plugins });
   const clients: OrganizationClient[] = [];
@@ -190,7 +191,7 @@ test("snapshot exports reject protected data and socket paths inside caller cwd"
   const dataDir = join(workspace, ".server-data"), socketPath = join(workspace, "server.sock");
   const tokens = new Map<string, string>();
   const server = await OrganizationServer.start({ dataDir, socketPath, plugins: [{ apiVersion: 1, name: "protected-fixture", setup(host) {
-    host.registerHarness({ name: "fixture", launch(context) { tokens.set(context.agent.id, context.token); return { command: process.execPath, args: [join(import.meta.dir, "fixtures/agent.ts")] }; } });
+    host.registerHarness({ name: "fixture", launch(context) { tokens.set(context.agent.id, context.token); return { command: process.execPath, args: ["--import", tsxImport, join(import.meta.dirname, "fixtures/agent.ts")] }; } });
   } }] });
   const clients: OrganizationClient[] = [];
   try {
@@ -208,7 +209,7 @@ test("snapshot exports reject protected data and socket paths inside caller cwd"
 test("scoped snapshots omit removed parents/children but retain stopped and failed direct records", async () => {
   const dir = mkdtempSync(join(tmpdir(), "org-snapshot-states-"));
   const server = await OrganizationServer.start({ dataDir: join(dir, "data"), socketPath: join(dir, "server.sock"), plugins: [{ apiVersion: 1, name: "state-fixture", setup(host) {
-    host.registerHarness({ name: "fixture", launch(context) { return { command: process.execPath, args: [join(import.meta.dir, "fixtures/agent.ts")] }; } });
+    host.registerHarness({ name: "fixture", launch(context) { return { command: process.execPath, args: ["--import", tsxImport, join(import.meta.dirname, "fixtures/agent.ts")] }; } });
   } }] });
   const clients: OrganizationClient[] = [];
   try {
@@ -237,7 +238,7 @@ test("container execution denies host-side snapshot export", async () => {
   const tokens = new Map<string, string>();
   const server = await OrganizationServer.start({ dataDir: join(dir, "data"), socketPath: join(dir, "server.sock"), plugins: [{ apiVersion: 1, name: "container-fixture", setup(host) {
     host.prepareLaunch(context => { context.executionEnvironment = "container"; });
-    host.registerHarness({ name: "fixture", launch(context) { tokens.set(context.agent.id, context.token); return { command: process.execPath, args: [join(import.meta.dir, "fixtures/agent.ts")] }; } });
+    host.registerHarness({ name: "fixture", launch(context) { tokens.set(context.agent.id, context.token); return { command: process.execPath, args: ["--import", tsxImport, join(import.meta.dirname, "fixtures/agent.ts")] }; } });
   } }] });
   const clients: OrganizationClient[] = [];
   try {
@@ -253,7 +254,7 @@ test("completion pins stay out of lightweight snapshots while active descendant 
   const dir = mkdtempSync(join(tmpdir(), "org-snapshot-completion-"));
   const tokens = new Map<string, string>();
   const server = await OrganizationServer.start({ dataDir: dir, socketPath: join(dir, "server.sock"), plugins: [{ apiVersion: 1, name: "snapshot-fixture", setup(host) {
-    host.registerHarness({ name: "fixture", launch(context) { tokens.set(context.agent.id, context.token); return { command: process.execPath, args: [join(import.meta.dir, "fixtures/agent.ts")] }; } });
+    host.registerHarness({ name: "fixture", launch(context) { tokens.set(context.agent.id, context.token); return { command: process.execPath, args: ["--import", tsxImport, join(import.meta.dirname, "fixtures/agent.ts")] }; } });
   } }] });
   const clients: OrganizationClient[] = [];
   const connect = async (token?: string) => { const client = await OrganizationClient.connect(join(dir, "server.sock"), token); clients.push(client); return client; };
@@ -307,7 +308,7 @@ test("lightweight snapshots retain active operations without resending terminal 
     plugins: [{ apiVersion: 1, name: "fixture", setup(host) {
       host.registerHarness({ name: "fixture", launch(context) {
         tokens.set(context.agent.id, context.token);
-        return { command: process.execPath, args: [join(import.meta.dir, "fixtures/agent.ts")] };
+        return { command: process.execPath, args: ["--import", tsxImport, join(import.meta.dirname, "fixtures/agent.ts")] };
       } });
     } }],
   });
