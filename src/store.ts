@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { Database } from "./sqlite.ts";
 import { mkdirSync, chmodSync } from "node:fs";
 import { dirname } from "node:path";
 import { ApiError, bounded, type AgentRecord, type Operation, type ServerEvent } from "./types.ts";
@@ -20,7 +20,7 @@ export class Store {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new Database(path, { create: true });
     chmodSync(path, 0o600);
-    this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
+    this.db.exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
       CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
       INSERT OR IGNORE INTO meta VALUES ('schema', 1), ('sequence', 0);
       CREATE TABLE IF NOT EXISTS agents (id TEXT PRIMARY KEY, data TEXT NOT NULL);
@@ -421,9 +421,7 @@ export class Store {
         bytes += length;
       }
     } finally {
-      // A cached .query() statement left mid-iteration cannot be safely reused
-      // on every supported Bun version. This short-lived statement is finalized.
-      rows.finalize();
+      // Node SQLite iterators own their statement lifecycle.
     }
     if (backwards) events.reverse();
     return { events, ...(options.render && { renderings }), oldestSeq, latestSeq, expired: after < oldestSeq - 1, hasMore };

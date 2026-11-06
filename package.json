@@ -8,12 +8,13 @@
     "./types": "./src/types.ts",
     "./client": "./src/client.ts"
   },
+  "engines": { "node": ">=22.14.0" },
   "scripts": {
-    "start": "bun src/cli.ts",
-    "build": "bun build --compile ./src/standalone.ts --outfile dist/agentorg",
-    "test:binary": "bun run build && ORG_BINARY=./dist/agentorg bun test tests/binary.test.ts",
+    "start": "node --experimental-strip-types src/cli.ts",
+    "build": "node scripts/build-sea.mjs",
+    "test:binary": "npm run build && ORG_BINARY=./dist/agentorg node --import tsx --test tests/binary.test.ts",
     "check": "tsc --noEmit",
-    "test": "bun test"
+    "test": "node --import tsx --test"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.7.0",
@@ -22,7 +23,11 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@types/bun": "^1.3.10",
-    "typescript": "^5.9.3"
+    "@types/node": "^22.13.10",
+    "tsx": "^4.19.3",
+    "typescript": "^5.9.3",
+    "vitest": "^3.0.8",
+    "esbuild": "^0.25.0",
+    "postject": "^1.0.0-alpha.6"
   }
 }
