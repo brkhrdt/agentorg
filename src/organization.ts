@@ -1818,7 +1818,9 @@ export class Organization implements PluginHost {
         await rt.process.stop();
       }
       a.generation = null;
-      this.state(a, "failed", errorShape(error).message);
+      const message = errorShape(error).message;
+      const stderr = rt?.process.stderr.trim();
+      this.state(a, "failed", stderr ? `${message}\nHarness stderr:\n${stderr}` : message);
       throw error;
     }
   }
