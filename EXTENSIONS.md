@@ -14,7 +14,10 @@ mutated or launched without their registered owner. Unknown legacy top-level
 persisted fields similarly block launch and modification, never disappear.
 Plugins may register a conservative legacy-settings migration. Initialization
 migrates all affected rows atomically, retaining revisions (representation only), before
-reconciliation and recovery. Ambiguous migrations abort startup without writes.
+reconciliation and recovery. Migration callbacks may optionally receive a detached
+`{ agent, agents }` context representing the same pre-migration agent-tree snapshot
+for every record; existing one-argument callbacks remain compatible. Ambiguous
+migrations abort startup without writes.
 
 ## Reusable client settings editors
 
