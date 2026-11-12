@@ -773,10 +773,12 @@ export class Organization implements PluginHost {
             new ApiError("INTERRUPTED", "Server restarted"),
           );
       const migrated: AgentRecord[] = [];
-      for (const original of this.agents.values()) {
+      // Every migration sees the same detached tree, never partially migrated peers.
+      const migrationAgents = [...this.agents.values()].map(a => structuredClone(a));
+      for (const original of migrationAgents) {
         let settings = structuredClone(original.settings) as Record<string, unknown>;
         for (const extension of this.extensionSettings.values())
-          if (extension.migrate) settings = extension.migrate(settings);
+          if (extension.migrate) settings = extension.migrate(settings, { agent: structuredClone(original), agents: structuredClone(migrationAgents) });
         if (!isDeepStrictEqual(settings, original.settings)) {
           const a = structuredClone(original);
           // Representation-only migrations retain revision: external journals may fence on it.

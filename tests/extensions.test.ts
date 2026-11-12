@@ -173,6 +173,28 @@ test("unknown persisted namespaces and legacy data are retained and cannot be si
   } finally { await org.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("tree-aware migration receives detached stable pre-migration records and remains compatible", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "extension-migration-tree-"));
+  const org = new Organization(join(dir, "server.sock"), dir);
+  try {
+    const row = { id: "tree-root", parentId: null, name: "root", metadata: {}, settings: { ...settings, extensions: { demo: { legacy: true } } }, revision: 9, state: "stopped", generation: null, sessionId: null, sessionNumber: 0, removedAt: null, createdAt: "now", updatedAt: "now" } as unknown as AgentRecord;
+    org.agents.set(row.id, row); org.store.saveAgent(row);
+    let context: any;
+    org.registerSettings({ namespace: "demo", validate: value => value, migrate(raw, supplied) { context = supplied; return { ...raw, extensions: { ...raw.extensions as object, demo: { migrated: true } } }; } });
+    await org.initialize(false);
+    expect(context.agent.id).toBe(row.id);
+    expect(context.agents).toHaveLength(1);
+    context.agents[0].settings.extensions.demo.legacy = false;
+    expect(org.agents.get(row.id)!.settings.extensions!.demo).toEqual({ migrated: true });
+    expect(org.agents.get(row.id)!.revision).toBe(9);
+    const before = org.store.agents()[0]!.settings;
+    await org.initialize(false);
+    expect(org.store.agents()[0]!.settings).toEqual(before);
+    // Existing one-argument callbacks remain valid.
+    org.registerSettings({ namespace: "old", validate: value => value, migrate(raw) { return raw; } });
+  } finally { await org.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("representation migrations are atomic and preserve journal revision fences", async () => {
   const dir = mkdtempSync(join(tmpdir(), "extension-migration-"));
   const org = new Organization(join(dir, "server.sock"), dir);

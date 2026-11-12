@@ -137,8 +137,8 @@ export interface ExtensionSettings {
   launchKey?(value: unknown): unknown;
   /** Synchronously project detached, intentionally public per-agent metadata for snapshot exports. Return bounded JSON only; omit secrets and raw settings. */
   snapshotMetadata?(value: unknown): unknown;
-  /** Runs only over persisted records, before startup reconciliation. */
-  migrate?(settings: Record<string, unknown>): Record<string, unknown>;
+  /** Runs only over persisted records, before startup reconciliation. The optional context is a detached pre-migration tree snapshot. */
+  migrate?(settings: Record<string, unknown>, context?: { agent: Readonly<AgentRecord>; agents: readonly Readonly<AgentRecord>[] }): Record<string, unknown>;
 }
 
 /** API v1 is additive. Breaking changes require a new apiVersion. Plugins are trusted. */
